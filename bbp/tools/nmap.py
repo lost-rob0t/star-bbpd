@@ -7,9 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from bbp.tool_actor import ToolActor
 from bbp.util import propagate_sources, propagate_dataset
 
-# Import starintel_doc (will be added as dependency)
-import sys
-sys.path.insert(0, "/home/unseen/Documents/Projects/starintelV4/spec/starintel_doc")
+# Import starintel_doc
 from starintel_doc.hosts import Host, Service
 from starintel_doc.relations import Relation
 
