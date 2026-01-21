@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pykka
 
 from bbp.events import create_event
-from bbp.publisher import PublishDocument, PublishRelation, PublishEvent
+from bbp.publisher_pool import PublishDocument, PublishRelation, PublishEvent
 from bbp.util import propagate_sources, propagate_dataset
 
 log = logging.getLogger(__name__)
