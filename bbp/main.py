@@ -31,13 +31,13 @@ def setup_logging(log_level: str = "INFO"):
 
 
 def emit_service_event(
-    publisher: Any, event_type: str, details: str, routing_config: Dict[str, Any]
+    publisher_ref: Any, event_type: str, details: str, routing_config: Dict[str, Any]
 ):
     """
     Emit a service-level event.
 
     Args:
-        publisher: Publisher actor reference
+        publisher_ref: Publisher actor reference
         event_type: Event type (service-start, service-ready, service-shutdown)
         details: Event details
         routing_config: Routing configuration
@@ -46,7 +46,7 @@ def emit_service_event(
 
     event = create_event("bbp-service", event_type, details, "")
     routing_key = routing_config["event_key"].format(eventType=event_type)
-    publisher.tell(PublishEvent(event, routing_key))
+    publisher_ref.tell(PublishEvent(event, routing_key))
 
 
 def main():
@@ -81,16 +81,18 @@ def main():
 
         # Start Publisher actor
         log.info("Starting Publisher actor...")
-        publisher = Publisher.start(rabbit_manager, config.data).proxy()
+        publisher_ref = Publisher.start(rabbit_manager, config.data)
+        publisher = publisher_ref.proxy()
 
         # Emit service-start event
         emit_service_event(
-            publisher, "service-start", "BBP Actor Service starting", config.routing
+            publisher_ref, "service-start", "BBP Actor Service starting", config.routing
         )
 
         # Start Tool Actors
         log.info("Starting Tool Actors...")
         tool_actors: Dict[str, Any] = {}
+        tool_actor_refs: Dict[str, Any] = {}
         for actor_name in config.enabled_actors():
             tool_class = TOOL_CLASSES.get(actor_name)
             if not tool_class:
@@ -98,40 +100,45 @@ def main():
                 continue
 
             tool_config = config.get_tool_config(actor_name)
-            tool_actor = tool_class.start(actor_name, publisher, tool_config).proxy()
+            tool_actor_ref = tool_class.start(actor_name, publisher_ref, tool_config)
+            tool_actor = tool_actor_ref.proxy()
 
             # Set routing config on tool actor
             tool_actor.routing = config.routing
 
             tool_actors[actor_name] = tool_actor
+            tool_actor_refs[actor_name] = tool_actor_ref
             log.info(f"Started {actor_name} tool actor")
 
         # Start Target Consumers
         log.info("Starting Target Consumers...")
         consumers: List[Any] = []
+        consumer_refs: List[Any] = []
         for actor_name in config.enabled_actors():
             actor_config = config.get_actor_config(actor_name)
-            consumer = TargetConsumer.start(
+            consumer_ref = TargetConsumer.start(
                 actor_name,
-                rabbit_manager,
-                publisher,
-                tool_actors[actor_name],
+                config.documents,  # Pass rabbit config instead of manager
+                publisher_ref,
+                tool_actor_refs[actor_name],
                 actor_config,
                 config.routing,
-            ).proxy()
+            )
+            consumer = consumer_ref.proxy()
             consumers.append(consumer)
+            consumer_refs.append(consumer_ref)
             log.info(f"Started {actor_name} target consumer")
 
         # Emit service-ready event
         emit_service_event(
-            publisher, "service-ready", "BBP Actor Service ready", config.routing
+            publisher_ref, "service-ready", "BBP Actor Service ready", config.routing
         )
         log.info("BBP Actor Service is ready")
 
         # Setup signal handlers for graceful shutdown
         def signal_handler(sig, frame):
             log.info(f"Received signal {sig}, shutting down...")
-            shutdown(consumers, tool_actors, publisher, rabbit_manager, config.routing)
+            shutdown(consumer_refs, tool_actor_refs, publisher_ref, rabbit_manager, config.routing)
 
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
@@ -153,9 +160,9 @@ def main():
 
 
 def shutdown(
-    consumers: List[Any],
-    tool_actors: Dict[str, Any],
-    publisher: Any,
+    consumer_refs: List[Any],
+    tool_actor_refs: Dict[str, Any],
+    publisher_ref: Any,
     rabbit_manager: RabbitManager,
     routing_config: Dict[str, Any],
 ):
@@ -163,9 +170,9 @@ def shutdown(
     Graceful shutdown sequence.
 
     Args:
-        consumers: List of TargetConsumer actor references
-        tool_actors: Dict of tool actor references
-        publisher: Publisher actor reference
+        consumer_refs: List of TargetConsumer actor references
+        tool_actor_refs: Dict of tool actor references
+        publisher_ref: Publisher actor reference
         rabbit_manager: RabbitManager instance
         routing_config: Routing configuration
     """
@@ -173,7 +180,7 @@ def shutdown(
 
     # Emit service-shutdown event
     emit_service_event(
-        publisher,
+        publisher_ref,
         "service-shutdown",
         "BBP Actor Service shutting down",
         routing_config,
@@ -181,9 +188,9 @@ def shutdown(
 
     # Stop consumers (stop receiving new targets)
     log.info("Stopping Target Consumers...")
-    for consumer in consumers:
+    for consumer_ref in consumer_refs:
         try:
-            consumer.stop()
+            consumer_ref.stop()
         except Exception as e:
             log.warning(f"Error stopping consumer: {e}")
 
@@ -193,9 +200,9 @@ def shutdown(
 
     # Stop tool actors
     log.info("Stopping Tool Actors...")
-    for actor_name, actor in tool_actors.items():
+    for actor_name, actor_ref in tool_actor_refs.items():
         try:
-            actor.stop()
+            actor_ref.stop()
         except Exception as e:
             log.warning(f"Error stopping {actor_name}: {e}")
 
@@ -203,7 +210,7 @@ def shutdown(
     log.info("Stopping Publisher...")
     try:
         time.sleep(1)  # Give publisher time to flush
-        publisher.stop()
+        publisher_ref.stop()
     except Exception as e:
         log.warning(f"Error stopping publisher: {e}")
 
