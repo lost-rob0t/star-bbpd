@@ -12,10 +12,10 @@ import pykka
 
 from bbp.config import Config
 from bbp.rabbit import RabbitManager
-from bbp.publisher import Publisher
+from bbp.publisher_pool import PublisherPool
 from bbp.consumer import TargetConsumer
 from bbp.events import create_event
-from bbp.tools import TOOL_CLASSES
+from bbp.tool_pool import create_tool_pools
 
 
 log = logging.getLogger(__name__)
@@ -31,22 +31,22 @@ def setup_logging(log_level: str = "INFO"):
 
 
 def emit_service_event(
-    publisher_ref: Any, event_type: str, details: str, routing_config: Dict[str, Any]
+    publisher: Any, event_type: str, details: str, routing_config: Dict[str, Any]
 ):
     """
     Emit a service-level event.
 
     Args:
-        publisher_ref: Publisher actor reference
+        publisher: Publisher pool proxy
         event_type: Event type (service-start, service-ready, service-shutdown)
         details: Event details
         routing_config: Routing configuration
     """
-    from bbp.publisher import PublishEvent
+    from bbp.publisher_pool import PublishEvent
 
     event = create_event("bbp-service", event_type, details, "")
     routing_key = routing_config["event_key"].format(eventType=event_type)
-    publisher_ref.tell(PublishEvent(event, routing_key))
+    publisher.tell(PublishEvent(event, routing_key))
 
 
 def main():
@@ -75,40 +75,31 @@ def main():
         enabled_actors = [
             (name, config.get_actor_config(name)) for name in config.enabled_actors()
         ]
+        routing_template = config.routing.get("target_key", "actors.{actor}.new.target")
         rabbit_manager.declare_topology(
-            enabled_actors, config.routing.get("target_key")
+            enabled_actors, routing_template
         )
 
-        # Start Publisher actor
-        log.info("Starting Publisher actor...")
-        publisher_ref = Publisher.start(rabbit_manager, config.data)
-        publisher = publisher_ref.proxy()
+        # Start Publisher pool
+        pool_size = config.service.get("publisher_pool_size", 3)
+        log.info(f"Starting Publisher pool with {pool_size} workers...")
+        publisher_pool = PublisherPool(rabbit_manager, config.data, pool_size)
+        publisher = publisher_pool.get_proxy()
+        publisher_ref = publisher_pool  # Store reference for shutdown
 
         # Emit service-start event
         emit_service_event(
-            publisher_ref, "service-start", "BBP Actor Service starting", config.routing
+            publisher, "service-start", "BBP Actor Service starting", config.routing
         )
 
-        # Start Tool Actors
-        log.info("Starting Tool Actors...")
-        tool_actors: Dict[str, Any] = {}
-        tool_actor_refs: Dict[str, Any] = {}
-        for actor_name in config.enabled_actors():
-            tool_class = TOOL_CLASSES.get(actor_name)
-            if not tool_class:
-                log.error(f"Unknown tool actor: {actor_name}")
-                continue
-
-            tool_config = config.get_tool_config(actor_name)
-            tool_actor_ref = tool_class.start(actor_name, publisher_ref, tool_config)
-            tool_actor = tool_actor_ref.proxy()
-
-            # Set routing config on tool actor
-            tool_actor.routing = config.routing
-
-            tool_actors[actor_name] = tool_actor
-            tool_actor_refs[actor_name] = tool_actor_ref
-            log.info(f"Started {actor_name} tool actor")
+        # Start Tool Actor Pools
+        log.info("Starting Tool Actor Pools...")
+        tool_pools = create_tool_pools(config, publisher_ref, config.routing)
+        tool_pool_proxies: Dict[str, Any] = {}
+        for tool_name, pool in tool_pools.items():
+            proxy = pool.get_proxy()
+            tool_pool_proxies[tool_name] = proxy
+            log.info(f"Started {tool_name} tool actor pool")
 
         # Start Target Consumers
         log.info("Starting Target Consumers...")
@@ -120,7 +111,7 @@ def main():
                 actor_name,
                 config.documents,  # Pass rabbit config instead of manager
                 publisher_ref,
-                tool_actor_refs[actor_name],
+                tool_pool_proxies[actor_name],
                 actor_config,
                 config.routing,
             )
@@ -131,14 +122,14 @@ def main():
 
         # Emit service-ready event
         emit_service_event(
-            publisher_ref, "service-ready", "BBP Actor Service ready", config.routing
+            publisher, "service-ready", "BBP Actor Service ready", config.routing
         )
         log.info("BBP Actor Service is ready")
 
         # Setup signal handlers for graceful shutdown
         def signal_handler(sig, frame):
             log.info(f"Received signal {sig}, shutting down...")
-            shutdown(consumer_refs, tool_actor_refs, publisher_ref, rabbit_manager, config.routing)
+            shutdown(consumer_refs, tool_pools, publisher_ref, rabbit_manager, config.routing)
 
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
@@ -161,7 +152,7 @@ def main():
 
 def shutdown(
     consumer_refs: List[Any],
-    tool_actor_refs: Dict[str, Any],
+    tool_pools: Dict[str, Any],
     publisher_ref: Any,
     rabbit_manager: RabbitManager,
     routing_config: Dict[str, Any],
@@ -171,16 +162,18 @@ def shutdown(
 
     Args:
         consumer_refs: List of TargetConsumer actor references
-        tool_actor_refs: Dict of tool actor references
-        publisher_ref: Publisher actor reference
+        tool_pools: Dict of tool actor pools
+        publisher_ref: PublisherPool instance
         rabbit_manager: RabbitManager instance
         routing_config: Routing configuration
     """
+    # Get publisher proxy for event emission
+    publisher = publisher_ref.get_proxy()
     log.info("Shutting down BBP Actor Service...")
 
     # Emit service-shutdown event
     emit_service_event(
-        publisher_ref,
+        publisher,
         "service-shutdown",
         "BBP Actor Service shutting down",
         routing_config,
@@ -198,21 +191,21 @@ def shutdown(
     log.info("Waiting for in-flight scans to complete...")
     time.sleep(2)  # Give scans time to finish
 
-    # Stop tool actors
-    log.info("Stopping Tool Actors...")
-    for actor_name, actor_ref in tool_actor_refs.items():
+    # Stop tool actor pools
+    log.info("Stopping Tool Actor Pools...")
+    for pool_name, pool in tool_pools.items():
         try:
-            actor_ref.stop()
+            pool.stop()
         except Exception as e:
-            log.warning(f"Error stopping {actor_name}: {e}")
+            log.warning(f"Error stopping {pool_name} pool: {e}")
 
-    # Stop publisher (flush pending publishes)
-    log.info("Stopping Publisher...")
+    # Stop publisher pool (flush pending publishes)
+    log.info("Stopping Publisher pool...")
     try:
-        time.sleep(1)  # Give publisher time to flush
+        time.sleep(2)  # Give publishers time to flush
         publisher_ref.stop()
     except Exception as e:
-        log.warning(f"Error stopping publisher: {e}")
+        log.warning(f"Error stopping publisher pool: {e}")
 
     # Close RabbitMQ connections
     log.info("Closing RabbitMQ connections...")

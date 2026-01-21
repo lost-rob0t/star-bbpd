@@ -173,8 +173,6 @@ docker run -d -p 5672:5672 -p 15672:15672 rabbitmq:3-management
 
 2. Create a test target (Python):
 ```python
-import sys
-sys.path.insert(0, "/path/to/starintel_doc")
 from starintel_doc.targets import new_target
 import pika
 
@@ -341,5 +339,5 @@ MIT
 ## References
 
 - Specification: `BBP_ACTOR_SERVICE.org`
-- StarIntel Document Library: `../spec/starintel_doc`
+- StarIntel Document Library: `starintel-doc` flake input
 - StarIntel Server: `../starintel-server`

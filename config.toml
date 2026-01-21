@@ -4,6 +4,8 @@
 name = "bbp-actors"
 log_level = "INFO"
 json_pretty = false
+publisher_pool_size = 3
+tool_pool_size = 2
 
 [documents]
 host = "bots.star.intel"
@@ -30,25 +32,25 @@ event_key = "event.{eventType}"
 [actors.subfinder]
 enabled = true
 queue = "bbp.subfinder.targets"
-prefetch = 1
+prefetch = 3
 emit_relations = true
 
 [actors.nmap]
 enabled = true
 queue = "bbp.nmap.targets"
-prefetch = 1
+prefetch = 2
 emit_relations = true
 
 [actors.httpx]
 enabled = true
 queue = "bbp.httpx.targets"
-prefetch = 2
+prefetch = 5
 emit_relations = true
 
 [actors.katana]
 enabled = true
 queue = "bbp.katana.targets"
-prefetch = 1
+prefetch = 3
 emit_relations = true
 
 # Tool Configurations

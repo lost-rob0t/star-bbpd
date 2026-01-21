@@ -4,7 +4,7 @@ import json
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import pika
 import pykka
@@ -14,8 +14,6 @@ from bbp.publisher import PublishEvent
 from bbp.tool_actor import ScanTarget
 
 # Import starintel_doc for Target validation
-import sys
-sys.path.insert(0, "/home/unseen/Documents/Projects/starintelV4/spec/starintel_doc")
 from starintel_doc.targets import Target
 
 log = logging.getLogger(__name__)
@@ -56,9 +54,9 @@ class TargetConsumer(pykka.ThreadingActor):
         self.routing_config = routing_config
         self.queue_name = actor_config.get("queue", f"bbp.{actor_name}.targets")
         self.prefetch = actor_config.get("prefetch", 1)
-        self.consume_thread: threading.Thread = None
-        self.connection: pika.BlockingConnection = None
-        self.channel: pika.channel.Channel = None
+        self.consume_thread = None
+        self.connection = None
+        self.channel = None
         self._stop_consuming = False
         self._pending_acks: Dict[int, bool] = {}  # delivery_tag -> should_ack
 
@@ -76,16 +74,30 @@ class TargetConsumer(pykka.ThreadingActor):
         log.info(f"[{self.actor_name}] Stopping TargetConsumer")
         self._stop_consuming = True
 
-        # Cancel consumer
+        # Try to stop consuming gracefully, but ignore pika errors during shutdown
         if self.channel and self.channel.is_open:
             try:
                 self.channel.stop_consuming()
             except Exception as e:
-                log.warning(f"[{self.actor_name}] Error stopping consumer: {e}")
+                # Ignore pika connection errors during shutdown - these are expected
+                if "pop from an empty deque" in str(e) or "StreamLostError" in str(e):
+                    log.debug(f"[{self.actor_name}] Ignoring expected pika shutdown error: {e}")
+                else:
+                    log.warning(f"[{self.actor_name}] Error stopping consumer: {e}")
 
         # Wait for thread to finish
         if self.consume_thread and self.consume_thread.is_alive():
             self.consume_thread.join(timeout=5)
+
+        # Close connection if still open (ignore errors)
+        if self.connection and self.connection.is_open:
+            try:
+                self.connection.close()
+            except Exception as e:
+                if "pop from an empty deque" in str(e) or "StreamLostError" in str(e):
+                    log.debug(f"[{self.actor_name}] Ignoring expected pika connection close error: {e}")
+                else:
+                    log.warning(f"[{self.actor_name}] Error closing connection: {e}")
 
     def on_receive(self, message):
         """Handle incoming messages"""

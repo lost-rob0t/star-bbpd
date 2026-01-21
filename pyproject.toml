@@ -12,6 +12,7 @@ dependencies = [
     "pykka",
     "ulid-py",
     "tomli; python_version<'3.11'",
+    "starintel-doc",
 ]
 
 [project.scripts]

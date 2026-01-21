@@ -84,6 +84,9 @@ class ToolActor(pykka.ThreadingActor, ABC):
             # Context dict for stateful parsing (e.g., nmap)
             context: Dict[str, Any] = {}
 
+            # Log stderr output for debugging
+            stderr_lines = []
+            
             # Process output line-by-line (memory safe)
             try:
                 for line in iter(process.stdout.readline, ""):
@@ -100,11 +103,14 @@ class ToolActor(pykka.ThreadingActor, ABC):
                         if doc:
                             self._emit_document(doc)
                             doc_count += 1
+                            log.info(f"[{self.actor_name}] Created document {doc_count}: {doc.dtype} ({doc.id})")
 
                         # Emit relation if present
                         if relation:
                             self._emit_relation(relation)
                             rel_count += 1
+                            log.info(f"[{self.actor_name}] Created relation {rel_count}: {relation.predicate} ({relation.source} -> {relation.target})")
+                            log.info(f"[{self.actor_name}] Created relation {rel_count}: {relation.predicate} ({relation.source} -> {relation.target})")
 
                 # Wait for completion with timeout
                 try:
@@ -121,17 +127,25 @@ class ToolActor(pykka.ThreadingActor, ABC):
                     self._send_ack(consumer_ref, delivery_tag)
                     return
 
+                # Read stderr output for debugging
+                stderr_output = ""
+                if process.stderr:
+                    stderr_output = process.stderr.read()
+                    if stderr_output:
+                        log.warning(f"[{self.actor_name}] Tool stderr output: {stderr_output}")
+
                 # Check exit code
                 exit_code = process.returncode
                 if exit_code != 0:
-                    stderr = process.stderr.read()[-500:] if process.stderr else ""
+                    stderr_snippet = stderr_output[-500:] if stderr_output else ""
                     self._emit_event(
                         "scan-error",
-                        f"Exit code {exit_code}, stderr: {stderr}",
+                        f"Exit code {exit_code}, stderr: {stderr_snippet}",
                         target.id,
                     )
                 else:
                     # Success
+                    log.info(f"[{self.actor_name}] Scan completed successfully: {doc_count} documents, {rel_count} relations created")
                     self._emit_event(
                         "scan-finished",
                         f"Finished {self.actor_name} scan: {doc_count} docs, {rel_count} relations",
