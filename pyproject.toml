@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "star-bbpd"
+version = "0.1.0"
+description = "BBP Actor Service"
+requires-python = ">=3.9"
+dependencies = [
+    "pika",
+    "pykka",
+    "ulid-py",
+    "tomli; python_version<'3.11'",
+]
+
+[project.scripts]
+star-bbpd = "bbp.main:main"

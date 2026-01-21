@@ -1,0 +1,451 @@
+#+title: Bug Bounty Actor Services Specification
+#+subtitle: Python Actor Service (Pykka + pika) for StarIntel BBP Scanning
+#+date: 2026-01-21
+#+version: 0.1.1-draft
+#+options: toc:2 num:t
+#+startup: overview
+
+* 1. Overview
+** 1.1 Goal
+Run bug-bounty/recon “tool actors” outside gserver in a separate Python process.
+Consume StarIntel Target documents from RabbitMQ.
+Emit StarIntel documents + relations back to RabbitMQ for gserver ingestion.
+No direct DB writes. Ever.
+
+** 1.2 Tech choices (locked)
+- Actor model: PYKKA (ThreadingActor)
+- RabbitMQ client: pika
+- Config: TOML
+- Runs continuously (daemon-style)
+- All actors in ONE process / ONE project
+
+** 1.3 Source of truth
+- starintel_doc is canonical for Python document creation + JSON encoding.
+- starintel-server is canonical for routing conventions + event subsystem.
+
+This spec must match source. If the source changes, this spec changes.
+
+* 2. RabbitMQ contract
+** 2.1 Exchanges
+Documents exchange (fixed):
+- exchange: "documents"
+- type: topic (recommended)
+
+Events exchange (match gserver event consumer):
+- exchange: "events"
+- type: topic (recommended)
+
+** 2.2 Input routing keys (targets)
+Each tool actor consumes its own targets:
+- routing key: actors.<actor>.new.target
+
+Queue per actor (recommended):
+- queue: bbp.<actor>.targets
+- bind: "documents" exchange + actors.<actor>.new.target
+
+** 2.3 Output routing keys (documents)
+All tool outputs publish to the documents exchange:
+- routing key template: document.new.<dtype>
+
+Examples:
+- document.new.domain
+- document.new.host
+- document.new.url
+- document.new.relation
+
+** 2.4 Output routing keys (events)
+All events publish to the events exchange:
+- routing key template: event.<eventType>
+
+Examples:
+- event.scan-start
+- event.scan-finished
+- event.scan-error
+- event.publish-error
+
+** 2.5 Ack policy
+Manual ack only.
+Ack after:
+- message parsed
+- scan-start event sent (best effort)
+- tool executed (or failed)
+- outputs published (best effort)
+- scan-finished or scan-error sent (best effort)
+
+Bad JSON / wrong dtype / missing required fields:
+- emit parse-error event
+- ack (don’t poison-loop)
+
+** 2.6 Prefetch
+Configurable per actor.
+Defaults:
+- subfinder: 1
+- nmap: 1
+- httpx: 2
+- katana: 1
+
+* 3. StarIntel document rules (Python side)
+** 3.1 Encoding
+All emitted docs MUST be encoded by starintel_doc.
+Do not hand-roll JSON except as a last resort.
+
+** 3.2 Canonical JSON rules (enforced)
+- camelCase keys
+- no explicit nulls (omit fields instead)
+- timestamps are unix int seconds
+- compact JSON (no pretty) by default
+
+** 3.3 Dataset propagation
+All emitted docs MUST use the same dataset as the input Target.
+
+** 3.4 Sources
+sources is an array of strings.
+Rules:
+- preserve target.sources when present
+- append tool provenance:
+  - tool:subfinder
+  - tool:nmap
+  - tool:httpx
+  - tool:katana
+
+* 4. Target ingestion spec
+** 4.1 Required Target fields
+Minimum required for this service:
+- dtype == "target"
+- actor: string (non-empty)
+- target: string (non-empty)
+
+Recommended additional fields (supported if present):
+- delay: int (seconds)
+- recurring: bool
+- options: list/object (tool-specific knobs)
+- sources: string[]
+- dataset/version/dateAdded/dateUpdated
+
+** 4.2 Actor selection
+The Target.actor chooses the consumer.
+If the message arrives on actors.<actor>.new.target, actor MUST still verify:
+- target.actor == <actor>
+If mismatch:
+- emit target-unroutable
+- ack
+
+** 4.3 Target ID semantics
+Target IDs may be deterministic (hash-based) in the Lisp side.
+Python service MUST treat inbound _id as authoritative.
+Python service MUST NOT mutate target docs.
+
+* 5. Relations 
+** 5.1 Relation document fields 
+Relation documents emitted by this service MUST include:
+- dtype = "relation"
+- source = source doc _id
+- target = target doc _id
+- predicate = string
+- note = string (may be empty)
+Plus standard meta fields per starintel_doc: _id, dataset, version, dateAdded/dateUpdated, sources.
+
+** 5.2 Predicate policy (no validation, no allowlist)
+- predicate can be ANY string (no validation, no allowlist, no throwing).
+- this service SHOULD stick to the known predicate vocabulary below.
+- only introduce a new predicate if none of the known ones fit.
+
+** 5.3 Predicate default
+If an actor would otherwise omit predicate:
+- predicate = "related-to"
+
+** 5.4 Recommended predicate vocabulary (use these)
+Identity:
+- related-to
+- same-as
+- duplicate-of
+- aka
+- alias-of
+- username-of
+- email-of
+- phone-of
+- account-of
+
+People / org:
+- member-of
+- employed-by
+- contractor-for
+- works-with
+- manages
+- reports-to
+
+Ownership / control:
+- owns
+- owned-by
+- controls
+- controlled-by
+- operates
+- operated-by
+- administers
+- administered-by
+
+WHOIS-ish:
+- registered-to
+- registrant-of
+- whois-registrant-of
+- whois-admin-of
+- whois-tech-of
+
+Location:
+- located-at
+- geolocated-at
+- seen-at
+
+Comms:
+- communicates-with
+- contacted
+- contacted-by
+- mentions
+- replies-to
+- follows
+
+Web:
+- links-to
+- redirects-to
+- canonical-url-of
+- hosts
+- hosted-by
+- served-by
+
+DNS / infra:
+- resolves-to
+- ptr-to
+- has-a
+- has-aaaa
+- has-cname
+- has-ns
+- has-mx
+- has-txt
+- has-spf
+- has-dkim
+- has-dmarc
+- has-soa
+- behind-cdn
+
+Network:
+- belongs-to-asn
+- served-from
+- shares-ip-with
+- shares-asn-with
+
+Ports / services:
+- hosts-service
+- listens-on
+- exposes-port
+- runs
+- runs-on
+
+Breach / creds:
+- leaked-in
+- credential-for
+- compromised-by
+
+Forensics:
+- observed-on
+- observed-by
+- collected-from
+- extracted-from
+- derived-from
+- downloaded-from
+- uploaded-to
+- created-by
+- modified-by
+- hashes-to
+- matches-hash
+- evidence-of
+- indicates
+
+Scope / scanning:
+- in-scope-of
+- out-of-scope-of
+- discovered-by
+- scanned-by
+- has-finding
+- vulnerable-to
+
+** 5.5 Relation emission patterns (defaults)
+- subfinder: target -> domain (predicate=has-a OR related-to, note="subdomain")
+- httpx: target -> url (predicate=related-to, note="httpx")
+- katana: seed-url -> discovered-url (predicate=links-to, note="crawl")
+- nmap:
+  - target -> host (predicate=related-to, note="host-discovery")
+  - host -> service/port (predicate=exposes-port OR hosts-service, note="port")
+
+* 6. Event subsystem integration
+** 6.1 Event payload
+Service emits JSON “actor events” to the events exchange.
+Fields (shape must match gserver):
+- _id: ULID
+- timestamp: unix int
+- actorName: string
+- eventType: string
+- details: string (freeform)
+- sourceId: string (usually the target _id)
+
+** 6.2 Required events
+Startup/shutdown:
+- service-start
+- service-ready
+- service-shutdown
+
+Per scan:
+- scan-start
+- scan-finished
+- scan-error
+
+Publishing:
+- publish-error (only when a publish fails)
+Parsing:
+- parse-error (bad JSON / missing required fields)
+
+* 7. Actors (Python process)
+** 7.1 Core components
+- RabbitManager: owns connection + channels + reconnect/backoff
+- Publisher: publishes docs + relations + events
+- TargetConsumer(actorName): consumes targets from queue, hands them to ToolActor
+- ToolActor(actorName): runs tool, parses output, emits docs/relations/events
+
+All of the above are Pykka actors in one process.
+
+** 7.2 Concurrency
+Default: 1 scan at a time per ToolActor.
+httpx MAY allow >1 later, but initial is 1 for determinism.
+No “shared dispatcher mode” in v0.1: one queue per actor.
+
+* 8. Tool actor behavior (tight)
+** 8.1 Subfinder
+Input target: domain
+Command:
+- subfinder -silent -d <domain>
+Outputs:
+- domain docs
+- relation: target -> domain (note="subdomain", predicate="has-a" or "related-to")
+
+** 8.2 Nmap
+Input target: host/ip/cidr
+Command (baseline; configurable):
+- nmap -sV <target>
+Outputs:
+- host doc(s)
+- service/port doc(s) if supported by starintel_doc
+- relations:
+  - target -> host (note="host-discovery", predicate="related-to")
+  - host -> service (note="port", predicate="exposes-port")
+
+** 8.3 Httpx
+Input target: host/domain/url
+Command (baseline; configurable):
+- httpx -silent -json -u <target>
+Outputs:
+- url docs
+- relation: target -> url (note="httpx", predicate="related-to")
+
+** 8.4 Katana
+Input target: url (or host normalized to url if configured)
+Command (baseline; configurable):
+- katana -silent -json -u <url>
+Outputs:
+- url docs
+- relation: seed -> discovered (note="crawl", predicate="links-to")
+
+* 9. Config (TOML)
+** 9.1 Required sections
+[service]
+[documents]    # documents exchange
+[events]       # events exchange
+[routing]
+[actors.<name>]
+[tools.<name>]
+
+** 9.2 Example config
+#+begin_src toml
+[service]
+name = "bbp-actors"
+log_level = "INFO"
+json_pretty = false
+
+[documents]
+host = "localhost"
+port = 5672
+vhost = "/"
+username = "guest"
+password = "guest"
+exchange = "documents"
+exchange_type = "topic"
+heartbeat_sec = 30
+
+[events]
+exchange = "events"
+exchange_type = "topic"
+
+[routing]
+target_key = "actors.{actor}.new.target"
+doc_key = "document.new.{dtype}"
+event_key = "event.{eventType}"
+
+[actors.subfinder]
+enabled = true
+queue = "bbp.subfinder.targets"
+prefetch = 1
+emit_relations = true
+
+[tools.subfinder]
+bin = "subfinder"
+timeout_sec = 300
+args = ["-silent"]
+
+[actors.nmap]
+enabled = true
+queue = "bbp.nmap.targets"
+prefetch = 1
+emit_relations = true
+
+[tools.nmap]
+bin = "nmap"
+timeout_sec = 1800
+args = ["-sV"]
+
+[actors.httpx]
+enabled = true
+queue = "bbp.httpx.targets"
+prefetch = 2
+emit_relations = true
+
+[tools.httpx]
+bin = "httpx"
+timeout_sec = 600
+args = ["-silent", "-json"]
+
+[actors.katana]
+enabled = true
+queue = "bbp.katana.targets"
+prefetch = 1
+emit_relations = true
+
+[tools.katana]
+bin = "katana"
+timeout_sec = 900
+args = ["-silent", "-json"]
+#+end_src
+
+* 10. Failure rules (simple)
+** 10.1 Tool failure
+- emit scan-error (details include exit code + stderr snippet)
+- ack message
+- continue
+
+** 10.2 Publish failure
+- emit publish-error
+- reconnect + retry with backoff (bounded)
+- if retries exhausted: drop outputs, ack target, continue
+
+** 10.3 Memory safety
+All output streams must be processed line-by-line (no “read whole tool output into RAM”).
+
+
+* End
