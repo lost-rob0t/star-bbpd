@@ -3,7 +3,7 @@
 import logging
 import time
 import threading
-from typing import Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 import pika
 from pika.exceptions import AMQPConnectionError, AMQPChannelError
@@ -21,12 +21,38 @@ class RabbitManager:
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
+        self.host = config.get("host", "localhost")
+        self.port = config.get("port", 5672)
+        self.vhost = config.get("vhost", "/")
+        self.username = config.get("username", "guest")
+        self.password = config.get("password", "guest")
+        self.heartbeat = config.get("heartbeat_sec", 30)
         self.connection: Optional[pika.BlockingConnection] = None
         self._lock = threading.Lock()
         self._publish_channel: Optional[pika.channel.Channel] = None
         self._consume_channels: Dict[str, pika.channel.Channel] = {}
         self._backoff_delays = [1, 2, 4, 8, 16, 30]  # exponential backoff (max 30s)
         self._retry_count = 0
+
+    def connection_parameters(self, connection_name: Optional[str] = None) -> pika.ConnectionParameters:
+        """Build pika ConnectionParameters from our config.
+
+        NOTE: pika connections/channels are NOT thread-safe; use one connection per thread.
+        """
+        credentials = pika.PlainCredentials(self.username, self.password)
+        client_properties = {"connection_name": connection_name} if connection_name else None
+        return pika.ConnectionParameters(
+            host=self.host,
+            port=self.port,
+            virtual_host=self.vhost,
+            credentials=credentials,
+            heartbeat=self.heartbeat,
+            client_properties=client_properties,
+        )
+
+    def new_connection(self, connection_name: Optional[str] = None) -> pika.BlockingConnection:
+        """Create a fresh BlockingConnection (use this per-thread)."""
+        return pika.BlockingConnection(self.connection_parameters(connection_name))
 
     def connect(self) -> bool:
         """
@@ -37,21 +63,10 @@ class RabbitManager:
         """
         while self._retry_count < len(self._backoff_delays):
             try:
-                params = pika.ConnectionParameters(
-                    host=self.config.get("host", "localhost"),
-                    port=self.config.get("port", 5672),
-                    virtual_host=self.config.get("vhost", "/"),
-                    credentials=pika.PlainCredentials(
-                        username=self.config.get("username", "guest"),
-                        password=self.config.get("password", "guest"),
-                    ),
-                    heartbeat=self.config.get("heartbeat_sec", 30),
-                )
-
                 log.info(
-                    f"Connecting to RabbitMQ at {params.host}:{params.port}{params.virtual_host}"
+                    f"Connecting to RabbitMQ at {self.host}:{self.port}{self.vhost}"
                 )
-                self.connection = pika.BlockingConnection(params)
+                self.connection = self.new_connection(connection_name="bbp.rabbit")
                 log.info("Connected to RabbitMQ successfully")
                 self._retry_count = 0  # reset on successful connection
                 return True
@@ -69,7 +84,9 @@ class RabbitManager:
 
     def get_publish_channel(self) -> pika.channel.Channel:
         """
-        Get a channel for publishing (thread-safe).
+        Get a channel for publishing.
+
+        NOTE: pika channels/connections are NOT thread-safe; do not share this across threads.
 
         Creates channel on first access and reuses it.
 

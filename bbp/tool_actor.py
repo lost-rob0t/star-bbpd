@@ -42,6 +42,7 @@ class ToolActor(pykka.ThreadingActor, ABC):
         self.publisher = publisher_ref
         self.tool_config = tool_config
         self.routing = None  # Set by main during initialization
+        log.debug(f"[{actor_name}] ToolActor initialized with publisher type: {type(publisher_ref)}")
 
     def on_receive(self, message):
         """Handle incoming messages"""
@@ -109,7 +110,6 @@ class ToolActor(pykka.ThreadingActor, ABC):
                         if relation:
                             self._emit_relation(relation)
                             rel_count += 1
-                            log.info(f"[{self.actor_name}] Created relation {rel_count}: {relation.predicate} ({relation.source} -> {relation.target})")
                             log.info(f"[{self.actor_name}] Created relation {rel_count}: {relation.predicate} ({relation.source} -> {relation.target})")
 
                 # Wait for completion with timeout
@@ -215,7 +215,12 @@ class ToolActor(pykka.ThreadingActor, ABC):
         Args:
             doc: StarIntel document object
         """
+        if not self.routing:
+            log.error(f"[{self.actor_name}] No routing config available for document emission")
+            return
+            
         routing_key = self.routing["doc_key"].format(dtype=doc.dtype)
+        log.debug(f"[{self.actor_name}] Publishing document to {routing_key}")
         self.publisher.tell(PublishDocument(doc, routing_key))
         log.debug(f"[{self.actor_name}] Emitted {doc.dtype} document: {doc.id}")
 
@@ -226,7 +231,12 @@ class ToolActor(pykka.ThreadingActor, ABC):
         Args:
             rel: StarIntel Relation object
         """
+        if not self.routing:
+            log.error(f"[{self.actor_name}] No routing config available for relation emission")
+            return
+            
         routing_key = self.routing["doc_key"].format(dtype="relation")
+        log.debug(f"[{self.actor_name}] Publishing relation to {routing_key}")
         self.publisher.tell(PublishRelation(rel, routing_key))
         log.debug(
             f"[{self.actor_name}] Emitted relation: {rel.predicate} ({rel.source} -> {rel.target})"
@@ -241,7 +251,17 @@ class ToolActor(pykka.ThreadingActor, ABC):
             details: Freeform details string
             source_id: ID of the source document (usually target._id)
         """
+        log.debug(f"[{self.actor_name}] Emitting event {event_type} to publisher type: {type(self.publisher)}")
+        
+        if not self.routing:
+            log.error(f"[{self.actor_name}] No routing config available for event emission")
+            return
+            
         event = create_event(self.actor_name, event_type, details, source_id)
         routing_key = self.routing["event_key"].format(eventType=event_type)
-        self.publisher.tell(PublishEvent(event, routing_key))
-        log.debug(f"[{self.actor_name}] Emitted event: {event_type}")
+        try:
+            self.publisher.tell(PublishEvent(event, routing_key))
+            log.debug(f"[{self.actor_name}] Successfully emitted event: {event_type}")
+        except Exception as e:
+            log.error(f"[{self.actor_name}] Failed to emit event {event_type}: {e}")
+            raise

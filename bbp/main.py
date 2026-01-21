@@ -94,7 +94,7 @@ def main():
 
         # Start Tool Actor Pools
         log.info("Starting Tool Actor Pools...")
-        tool_pools = create_tool_pools(config, publisher_ref, config.routing)
+        tool_pools = create_tool_pools(config, publisher, config.routing)
         tool_pool_proxies: Dict[str, Any] = {}
         for tool_name, pool in tool_pools.items():
             proxy = pool.get_proxy()

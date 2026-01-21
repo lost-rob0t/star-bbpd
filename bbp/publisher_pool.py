@@ -5,7 +5,7 @@ import logging
 import time
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import itertools
 
 import pika
@@ -53,6 +53,49 @@ class PublisherWorker(pykka.ThreadingActor):
         self.events_exchange = config.get("events", {}).get("exchange", "events")
         self.max_retries = 3
         self.retry_delays = [1, 2, 4]  # exponential backoff in seconds
+        # pika connections/channels are NOT thread-safe; each worker owns its own connection
+        self._connection: Optional[pika.BlockingConnection] = None
+        self._channel: Optional[pika.channel.Channel] = None
+        self._conn_lock = threading.Lock()
+
+    def on_stop(self) -> None:
+        """Close our per-worker connection cleanly."""
+        self._reset_connection()
+
+    def _reset_connection(self) -> None:
+        """Force a reconnect on next publish attempt."""
+        with self._conn_lock:
+            try:
+                if self._channel and getattr(self._channel, "is_open", False):
+                    try:
+                        self._channel.close()
+                    except Exception:
+                        pass
+            finally:
+                self._channel = None
+
+            try:
+                if self._connection and getattr(self._connection, "is_open", False):
+                    try:
+                        self._connection.close()
+                    except Exception:
+                        pass
+            finally:
+                self._connection = None
+
+    def _ensure_channel(self) -> pika.channel.Channel:
+        """Ensure this worker has an open connection+channel (owned by this thread)."""
+        with self._conn_lock:
+            if self._connection is None or not getattr(self._connection, "is_open", False):
+                self._connection = self.rabbit_manager.new_connection(
+                    connection_name=f"bbp.publisher.{self.worker_id}"
+                )
+                self._channel = None
+
+            if self._channel is None or not getattr(self._channel, "is_open", False):
+                self._channel = self._connection.channel()
+
+            return self._channel
 
     def on_receive(self, message):
         """Handle incoming messages"""
@@ -144,7 +187,7 @@ class PublisherWorker(pykka.ThreadingActor):
 
         for attempt in range(self.max_retries):
             try:
-                channel = self.rabbit_manager.get_publish_channel()
+                channel = self._ensure_channel()
                 channel.basic_publish(
                     exchange=exchange,
                     routing_key=routing_key,
@@ -160,6 +203,7 @@ class PublisherWorker(pykka.ThreadingActor):
                     log.warning(
                         f"[Publisher-{self.worker_id}] Publish failed (attempt {attempt + 1}/{self.max_retries}): {e}. Retrying in {delay}s..."
                     )
+                    self._reset_connection()
                     time.sleep(delay)
                 else:
                     log.error(
@@ -252,11 +296,15 @@ class PublisherPoolProxy:
 
     def tell(self, message):
         """Handle tell() calls like a regular actor."""
+        log.debug(f"PublisherPoolProxy received message type: {type(message)}")
         if isinstance(message, PublishDocument):
+            log.debug(f"Publishing document to routing key: {message.routing_key}")
             self.pool.publish_document(message.doc, message.routing_key)
         elif isinstance(message, PublishRelation):
+            log.debug(f"Publishing relation to routing key: {message.routing_key}")
             self.pool.publish_relation(message.rel, message.routing_key)
         elif isinstance(message, PublishEvent):
+            log.debug(f"Publishing event to routing key: {message.routing_key}")
             self.pool.publish_event(message.event, message.routing_key)
         else:
             log.warning(f"PublisherPoolProxy: Unknown message type: {type(message)}")

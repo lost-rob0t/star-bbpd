@@ -23,7 +23,7 @@ exchange_type = "topic"
 
 [routing]
 target_key = "actors.{actor}.new.target"
-doc_key = "document.new.{dtype}"
+doc_key = "documents.new.{dtype}"
 event_key = "event.{eventType}"
 
 # Actor Configurations

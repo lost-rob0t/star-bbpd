@@ -59,6 +59,20 @@ class TargetConsumer(pykka.ThreadingActor):
         self.channel = None
         self._stop_consuming = False
         self._pending_acks: Dict[int, bool] = {}  # delivery_tag -> should_ack
+        self._conn_lock = threading.Lock()
+
+    def _call_in_consume_thread(self, fn) -> bool:
+        """Run `fn` on the consume thread safely (pika channel is not thread-safe)."""
+        with self._conn_lock:
+            conn = self.connection
+        if not conn:
+            return False
+        try:
+            conn.add_callback_threadsafe(fn)
+            return True
+        except Exception as e:
+            log.debug("[%s] add_callback_threadsafe failed: %s", self.actor_name, e)
+            return False
 
     def on_start(self):
         """Start consume thread when actor starts"""
@@ -268,13 +282,12 @@ class TargetConsumer(pykka.ThreadingActor):
         Args:
             delivery_tag: RabbitMQ delivery tag to ack
         """
-        try:
-            if self.channel and self.channel.is_open:
-                self.channel.basic_ack(delivery_tag=delivery_tag)
-                log.debug(f"[{self.actor_name}] Acked delivery_tag: {delivery_tag}")
-            else:
-                log.warning(
-                    f"[{self.actor_name}] Cannot ack {delivery_tag}: channel closed"
-                )
-        except Exception as e:
-            log.error(f"[{self.actor_name}] Error acking {delivery_tag}: {e}")
+        def _do_ack():
+            try:
+                if self.channel and self.channel.is_open:
+                    self.channel.basic_ack(delivery_tag=delivery_tag)
+            except Exception as e:
+                log.error("[%s] Failed to ack delivery_tag=%s: %s", self.actor_name, delivery_tag, e)
+
+        if not self._call_in_consume_thread(_do_ack):
+            log.warning("[%s] Ack dropped; connection not ready", self.actor_name)
