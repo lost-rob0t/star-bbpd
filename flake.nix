@@ -4,9 +4,13 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    starintel-doc = {
+      url = "github:lost-rob0t/starintel-doc";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, starintel-doc }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -19,6 +23,28 @@
           katana
           nmap
         ];
+
+        # Rebuild starintel-doc with our Python version
+        starintel-doc-pkg = pythonPackages.buildPythonPackage rec {
+          pname = "starintel_doc";
+          version = "0.8.2";
+          format = "setuptools";
+
+          src = starintel-doc;
+
+          propagatedBuildInputs = with pythonPackages; [
+            python-ulid
+            dataclasses-json
+          ];
+
+          doCheck = false;
+
+          meta = with pkgs.lib; {
+            description = "Document Spec for Star intel";
+            homepage = "https://github.com/lost-rob0t/starintel_doc";
+            license = licenses.mit;
+          };
+        };
 
         star-bbpd = pythonPackages.buildPythonPackage {
           pname = "star-bbpd";
@@ -39,6 +65,7 @@
             python-ulid
             tomli
             dataclasses-json
+            starintel-doc-pkg
           ];
 
           dontCheckRuntimeDeps = true;
@@ -66,6 +93,7 @@
             python-ulid
             tomli
             dataclasses-json
+            starintel-doc-pkg
             pytest
             black
             flake8
