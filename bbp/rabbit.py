@@ -84,11 +84,11 @@ class RabbitManager:
 
     def get_publish_channel(self) -> pika.channel.Channel:
         """
-        Get a channel for publishing.
+        DEPRECATED: Use new_connection() per-thread instead.
 
-        NOTE: pika channels/connections are NOT thread-safe; do not share this across threads.
-
-        Creates channel on first access and reuses it.
+        This method is UNSAFE for multi-threaded use. Pika channels/connections
+        are NOT thread-safe. Only use this in single-threaded contexts like topology
+        declaration at startup.
 
         Returns:
             pika channel for publishing
@@ -96,6 +96,10 @@ class RabbitManager:
         Raises:
             RuntimeError: if not connected
         """
+        log.warning(
+            "get_publish_channel() is DEPRECATED and NOT thread-safe. "
+            "Use new_connection() per thread for publishing."
+        )
         with self._lock:
             if not self.is_connected():
                 raise RuntimeError("Not connected to RabbitMQ")
@@ -138,35 +142,50 @@ class RabbitManager:
         """
         Declare RabbitMQ exchanges, queues, and bindings.
 
+        Uses a short-lived connection/channel for topology declaration.
+        This is safe since topology is declared once at startup in a single thread.
+
         Args:
             enabled_actors: List of (actor_name, actor_config) tuples
             routing_template: Template for routing key (e.g., "actors.{actor}.new.target")
         """
-        if not self.is_connected():
-            raise RuntimeError("Cannot declare topology: not connected")
+        log.info("Declaring RabbitMQ topology with short-lived connection")
 
-        channel = self.get_publish_channel()
+        # Create a short-lived connection for topology declaration
+        topology_conn = self.new_connection(connection_name="bbp.topology")
+        channel = None
+        try:
+            channel = topology_conn.channel()
 
-        # Declare documents exchange
-        exchange_name = self.config.get("exchange", "documents")
-        exchange_type = self.config.get("exchange_type", "topic")
-        log.info(f"Declaring exchange: {exchange_name} (type: {exchange_type})")
-        channel.exchange_declare(
-            exchange=exchange_name, exchange_type=exchange_type, durable=True
-        )
-
-        # Declare queues and bindings for each enabled actor
-        for actor_name, actor_config in enabled_actors:
-            queue_name = actor_config.get("queue", f"bbp.{actor_name}.targets")
-            routing_key = routing_template.format(actor=actor_name)
-
-            log.info(f"Declaring queue: {queue_name} -> {routing_key}")
-            channel.queue_declare(queue=queue_name, durable=True)
-            channel.queue_bind(
-                queue=queue_name, exchange=exchange_name, routing_key=routing_key
+            # Declare documents exchange
+            exchange_name = self.config.get("exchange", "documents")
+            exchange_type = self.config.get("exchange_type", "topic")
+            log.info(f"Declaring exchange: {exchange_name} (type: {exchange_type})")
+            channel.exchange_declare(
+                exchange=exchange_name, exchange_type=exchange_type, durable=True
             )
 
-        log.info("RabbitMQ topology declared successfully")
+            # Declare queues and bindings for each enabled actor
+            for actor_name, actor_config in enabled_actors:
+                queue_name = actor_config.get("queue", f"bbp.{actor_name}.targets")
+                routing_key = routing_template.format(actor=actor_name)
+
+                log.info(f"Declaring queue: {queue_name} -> {routing_key}")
+                channel.queue_declare(queue=queue_name, durable=True)
+                channel.queue_bind(
+                    queue=queue_name, exchange=exchange_name, routing_key=routing_key
+                )
+
+            log.info("RabbitMQ topology declared successfully")
+        finally:
+            # Clean up short-lived connection
+            try:
+                if channel and channel.is_open:
+                    channel.close()
+                if topology_conn and topology_conn.is_open:
+                    topology_conn.close()
+            except Exception as e:
+                log.warning(f"Error closing topology connection: {e}")
 
     def is_connected(self) -> bool:
         """Check if connected to RabbitMQ"""

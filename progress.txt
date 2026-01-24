@@ -5,3 +5,4 @@
 
 [2026-01-24 iter-0] setup ralph loop inputs | none yet | unify publisher interface (no internals access)
 [2026-01-24 iter-1] standardized main.py to use PublisherPoolProxy consistently | all actors access publisher via .tell() only, no pool internals exposed | fix RabbitManager threading (Task B)
+[2026-01-24 iter-2] fixed RabbitManager threading violations | deprecated get_publish_channel(), declare_topology uses short-lived connection, new_connection() is authoritative | fix ToolActor publisher integration (Task C)
