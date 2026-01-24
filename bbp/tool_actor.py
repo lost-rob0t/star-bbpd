@@ -42,7 +42,6 @@ class ToolActor(pykka.ThreadingActor, ABC):
         self.publisher = publisher_ref
         self.tool_config = tool_config
         self.routing = None  # Set by main during initialization
-        self._assigned_worker = None  # Track assigned publisher worker
         log.debug(f"[{actor_name}] ToolActor initialized with publisher type: {type(publisher_ref)}")
 
     def on_receive(self, message):
@@ -63,8 +62,6 @@ class ToolActor(pykka.ThreadingActor, ABC):
             delivery_tag: For ack callback
             consumer_ref: Reference to TargetConsumer actor for ack
         """
-        # Reset assigned worker for each new scan target
-        self._assigned_worker = None
         doc_count = 0
         rel_count = 0
 
@@ -221,14 +218,11 @@ class ToolActor(pykka.ThreadingActor, ABC):
         if not self.routing:
             log.error(f"[{self.actor_name}] No routing config available for document emission")
             return
-            
+
         routing_key = self.routing["doc_key"].format(dtype=doc.dtype)
         log.debug(f"[{self.actor_name}] Publishing document to {routing_key}")
-        
-        # Use the same worker for all items from this tool actor
-        if self._assigned_worker is None:
-            self._assigned_worker = self.publisher._get_next_worker()
-        self._assigned_worker.tell(PublishDocument(doc, routing_key))
+
+        self.publisher.tell(PublishDocument(doc, routing_key))
         log.debug(f"[{self.actor_name}] Emitted {doc.dtype} document: {doc.id}")
 
     def _emit_relation(self, rel: Any):
@@ -241,14 +235,11 @@ class ToolActor(pykka.ThreadingActor, ABC):
         if not self.routing:
             log.error(f"[{self.actor_name}] No routing config available for relation emission")
             return
-            
+
         routing_key = self.routing["doc_key"].format(dtype="relation")
         log.debug(f"[{self.actor_name}] Publishing relation to {routing_key}")
-        
-        # Use the same worker for all items from this tool actor
-        if self._assigned_worker is None:
-            self._assigned_worker = self.publisher._get_next_worker()
-        self._assigned_worker.tell(PublishRelation(rel, routing_key))
+
+        self.publisher.tell(PublishRelation(rel, routing_key))
         log.debug(
             f"[{self.actor_name}] Emitted relation: {rel.predicate} ({rel.source} -> {rel.target})"
         )
