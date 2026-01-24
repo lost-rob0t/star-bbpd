@@ -7,6 +7,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import itertools
+import hashlib
 
 import pika
 import pykka

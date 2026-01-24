@@ -1,0 +1,6 @@
+# progress.txt
+# append-only. one entry per iteration.
+# format:
+# [YYYY-MM-DD iter-N] change summary | invariant enforced | next task
+
+[2026-01-24 iter-0] setup ralph loop inputs | none yet | unify publisher interface (no internals access)
