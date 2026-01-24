@@ -85,7 +85,7 @@ def main():
         log.info(f"Starting Publisher pool with {pool_size} workers...")
         publisher_pool = PublisherPool(rabbit_manager, config.data, pool_size)
         publisher = publisher_pool.get_proxy()
-        publisher_ref = publisher_pool  # Store reference for shutdown
+        # Keep pool instance only for shutdown, use proxy for all publishing
 
         # Emit service-start event
         emit_service_event(
@@ -110,7 +110,7 @@ def main():
             consumer_ref = TargetConsumer.start(
                 actor_name,
                 config.documents,  # Pass rabbit config instead of manager
-                publisher_ref,
+                publisher,  # Use proxy for consistent .tell() interface
                 tool_pool_proxies[actor_name],
                 actor_config,
                 config.routing,
@@ -129,7 +129,7 @@ def main():
         # Setup signal handlers for graceful shutdown
         def signal_handler(sig, frame):
             log.info(f"Received signal {sig}, shutting down...")
-            shutdown(consumer_refs, tool_pools, publisher_ref, rabbit_manager, config.routing)
+            shutdown(consumer_refs, tool_pools, publisher_pool, rabbit_manager, config.routing, publisher)
 
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
@@ -153,9 +153,10 @@ def main():
 def shutdown(
     consumer_refs: List[Any],
     tool_pools: Dict[str, Any],
-    publisher_ref: Any,
+    publisher_pool: PublisherPool,
     rabbit_manager: RabbitManager,
     routing_config: Dict[str, Any],
+    publisher: Any,
 ):
     """
     Graceful shutdown sequence.
@@ -163,12 +164,11 @@ def shutdown(
     Args:
         consumer_refs: List of TargetConsumer actor references
         tool_pools: Dict of tool actor pools
-        publisher_ref: PublisherPool instance
+        publisher_pool: PublisherPool instance for stopping workers
         rabbit_manager: RabbitManager instance
         routing_config: Routing configuration
+        publisher: PublisherPoolProxy for event emission
     """
-    # Get publisher proxy for event emission
-    publisher = publisher_ref.get_proxy()
     log.info("Shutting down BBP Actor Service...")
 
     # Emit service-shutdown event
@@ -203,7 +203,7 @@ def shutdown(
     log.info("Stopping Publisher pool...")
     try:
         time.sleep(2)  # Give publishers time to flush
-        publisher_ref.stop()
+        publisher_pool.stop()
     except Exception as e:
         log.warning(f"Error stopping publisher pool: {e}")
 
