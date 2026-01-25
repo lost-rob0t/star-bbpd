@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from bbp.tool_actor import ToolActor
 from bbp.util import propagate_sources, propagate_dataset
 
-# Import starintel_doc
 from starintel_doc.hosts import Domain
 from starintel_doc.relations import Relation
 
@@ -17,77 +16,86 @@ class SubfinderActor(ToolActor):
     """
     Subfinder tool actor.
 
-    Consumes domain targets, runs subfinder, emits Domain docs + relations.
-
-    Command: subfinder -silent -d <domain>
-    Output: Plain text, one subdomain per line
+    Consumes domain targets, runs subfinder, emits:
+      - a root Domain doc for the target domain (once per scan)
+      - Domain docs for discovered subdomains
+      - Relation: root_domain -> subdomain (NOT target -> subdomain)
     """
 
     def _build_command(self, target: Any) -> List[str]:
-        """
-        Build subfinder command.
-
-        Args:
-            target: StarIntel Target object with .target field (domain)
-
-        Returns:
-            Command list: ["subfinder", "-silent", "-d", "example.com", ...]
-        """
         bin_path = self.tool_config.get("bin", "subfinder")
         args = self.tool_config.get("args", [])
 
         cmd = [bin_path]
 
-        # Add configured args if not already containing -d flag
         if "-d" not in args:
             cmd.extend(args)
             cmd.extend(["-d", target.target])
         else:
-            # Args already contain -d, use as-is (replace domain)
             cmd.extend([arg if arg != "{target}" else target.target for arg in args])
 
         return cmd
 
+    def _make_domain_doc(self, domain_str: str, target: Any) -> Domain:
+        dataset = propagate_dataset(target)
+        sources = propagate_sources(target, "subfinder")
+
+        doc = Domain(
+            record_type="A",
+            record=domain_str,
+            resolved_addresses=[],
+            dataset=dataset,
+            sources=sources,
+        )
+        doc.set_meta(dataset)
+        return doc
+
+    def _pre_scan(self, target: Any, context: Dict[str, Any]) -> Tuple[int, int]:
+        root_str = (getattr(target, "target", "") or "").strip()
+        if not root_str:
+            return (0, 0)
+
+        root_domain = self._make_domain_doc(root_str, target)
+        context["root_domain"] = root_domain
+        context["seen_domains"] = {root_str}
+
+        self._emit_document(root_domain)
+        log.info(f"[{self.actor_name}] Emitted root domain for target: {root_str} ({root_domain.id})")
+
+        return (1, 0)
+
     def _parse_line(
         self, line: str, target: Any, context: Dict[str, Any]
     ) -> Optional[Tuple[Any, Any]]:
-        """
-        Parse a line of subfinder output.
-
-        Args:
-            line: Line from subfinder stdout (plain text domain)
-            target: StarIntel Target object
-            context: Unused for subfinder (stateless)
-
-        Returns:
-            (Domain doc, Relation) tuple, or None if line is empty
-        """
-        # Strip whitespace
         domain_str = line.strip()
-
-        # Skip empty lines
         if not domain_str:
             return None
 
-        # Create Domain document
-        domain = Domain(
-            record_type="A",  # Default to A record (could be enhanced with DNS lookup)
-            record=domain_str,
-            resolved_addresses=[],  # Could be populated with DNS resolution
-            dataset=propagate_dataset(target),
-            sources=propagate_sources(target, "subfinder"),
-        )
-        domain.set_id()  # Generates hash-based ID
+        root_domain = context.get("root_domain")
+        if root_domain is None:
+            root_str = (getattr(target, "target", "") or "").strip()
+            if not root_str:
+                return None
+            root_domain = self._make_domain_doc(root_str, target)
+            context["root_domain"] = root_domain
+            context["seen_domains"] = {root_str}
+            self._emit_document(root_domain)
 
-        # Create Relation: target -> domain
+        seen = context.setdefault("seen_domains", set())
+        if domain_str in seen:
+            return None
+        seen.add(domain_str)
+
+        subdomain = self._make_domain_doc(domain_str, target)
+
         relation = Relation(
-            source=target.id,
-            target=domain.id,
-            predicate="has-a",
+            source=root_domain.id,
+            target=subdomain.id,
+            predicate="subdomain",
             note="subdomain",
             dataset=propagate_dataset(target),
             sources=propagate_sources(target, "subfinder"),
         )
-        relation.set_id()  # Generates ULID
+        relation.set_meta(propagate_dataset(target))
 
-        return (domain, relation)
+        return (subdomain, relation)
