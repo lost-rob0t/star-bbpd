@@ -72,3 +72,6 @@ Add explicit runtime asserts where it prevents unsafe wiring:
 - Assert publisher instance conforms to the chosen stable API.
 - Assert no code path calls into publisher-private internals.
 - Assert connections/channels are created per-thread (or per-worker) only.
+
+## Test file policy
+when you are doing a small test (not unit testing) write the temp test files to /tmp/w
