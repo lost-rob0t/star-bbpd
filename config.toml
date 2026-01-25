@@ -3,6 +3,7 @@
 [service]
 name = "bbp-actors"
 log_level = "INFO"
+log_file = "/tmp/bbp-actors.log"  # Path to log file (omit or set to "" for stdout only)
 json_pretty = false
 publisher_pool_size = 3
 tool_pool_size = 2

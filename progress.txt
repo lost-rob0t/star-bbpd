@@ -6,3 +6,5 @@
 [2026-01-24 iter-0] setup ralph loop inputs | none yet | unify publisher interface (no internals access)
 [2026-01-24 iter-1] standardized main.py to use PublisherPoolProxy consistently | all actors access publisher via .tell() only, no pool internals exposed | fix RabbitManager threading (Task B)
 [2026-01-24 iter-2] fixed RabbitManager threading violations | deprecated get_publish_channel(), declare_topology uses short-lived connection, new_connection() is authoritative | fix ToolActor publisher integration (Task C)
+[2026-01-24 iter-3] unified all publisher imports to use publisher_pool | consumer.py now imports from publisher_pool, no code depends on old publisher.py | verify main.py wiring consistency (Task D/E)
+[2026-01-24 iter-4] hard-deprecated legacy publisher.py with import guard | any attempt to import bbp.publisher raises DeprecationWarning with migration instructions | add startup safety asserts (Task 5)

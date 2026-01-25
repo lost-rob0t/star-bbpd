@@ -6,7 +6,7 @@ import logging
 import signal
 import sys
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import pykka
 
@@ -21,12 +21,39 @@ from bbp.tool_pool import create_tool_pools
 log = logging.getLogger(__name__)
 
 
-def setup_logging(log_level: str = "INFO"):
-    """Setup logging configuration"""
+def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None):
+    """Setup logging configuration
+
+    Args:
+        log_level: Log level (DEBUG, INFO, WARNING, ERROR)
+        log_file: Path to log file (if None, logs to stdout only)
+    """
+    handlers = []
+
+    # Console handler (stdout)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    handlers.append(console_handler)
+
+    # File handler (if log_file specified)
+    if log_file:
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+        handlers.append(file_handler)
+
     logging.basicConfig(
         level=getattr(logging, log_level.upper(), logging.INFO),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=handlers,
     )
 
 
@@ -61,7 +88,10 @@ def main():
         log.info("Configuration loaded and validated successfully")
 
         # Setup logging
-        setup_logging(config.service.get("log_level", "INFO"))
+        setup_logging(
+            config.service.get("log_level", "INFO"),
+            config.service.get("log_file")
+        )
 
         # Initialize RabbitMQ connection
         log.info("Connecting to RabbitMQ...")
@@ -86,6 +116,21 @@ def main():
         publisher_pool = PublisherPool(rabbit_manager, config.data, pool_size)
         publisher = publisher_pool.get_proxy()
         # Keep pool instance only for shutdown, use proxy for all publishing
+
+        # Safety assertions: fail fast if wiring is unsafe
+        from bbp.publisher_pool import PublisherPoolProxy
+        assert isinstance(publisher, PublisherPoolProxy), (
+            f"Publisher must be PublisherPoolProxy, got {type(publisher)}. "
+            "This prevents accidental use of unsafe publisher wiring."
+        )
+        assert hasattr(publisher, 'tell'), (
+            "Publisher proxy must have .tell() method for actor message passing"
+        )
+        assert pool_size > 0, "Publisher pool size must be > 0"
+        assert len(publisher_pool.workers) == pool_size, (
+            f"Publisher pool should have {pool_size} workers, got {len(publisher_pool.workers)}"
+        )
+        log.info(f"✓ Publisher safety checks passed: {pool_size} workers, PublisherPoolProxy interface")
 
         # Emit service-start event
         emit_service_event(

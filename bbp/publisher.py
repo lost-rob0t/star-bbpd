@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
 
+"""
+DEPRECATED: This module is deprecated and should not be used.
+Use bbp.publisher_pool instead.
+
+This single-threaded Publisher uses a shared RabbitMQ channel (get_publish_channel()),
+which is NOT thread-safe and will cause random failures under concurrent load.
+
+If you see this error, you're trying to import from the wrong module.
+Update your imports to use: from bbp.publisher_pool import ...
+"""
+
+raise DeprecationWarning(
+    "bbp.publisher is DEPRECATED. Use bbp.publisher_pool instead. "
+    "This module uses unsafe shared RabbitMQ channels that cause thread-safety issues. "
+    "Update all imports to: from bbp.publisher_pool import PublishDocument, PublishRelation, PublishEvent"
+)
+
 import json
 import logging
 import time

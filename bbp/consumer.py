@@ -10,7 +10,7 @@ import pika
 import pykka
 
 from bbp.events import create_event
-from bbp.publisher import PublishEvent
+from bbp.publisher_pool import PublishEvent
 from bbp.tool_actor import ScanTarget
 
 # Import starintel_doc for Target validation
@@ -186,13 +186,16 @@ class TargetConsumer(pykka.ThreadingActor):
             properties: pika properties
             body: message body (bytes)
         """
+        log.debug(f"[{self.actor_name}] _handle_target called with delivery_tag={method.delivery_tag}")
         try:
             # Decode body
             body_str = body.decode("utf-8")
+            log.debug(f"[{self.actor_name}] Decoded message body: {body_str[:100]}...")
 
             # Parse JSON to Target object
             try:
                 target = Target.from_json(body_str)
+                log.debug(f"[{self.actor_name}] Parsed target: dtype={target.dtype}, actor={target.actor}, target={target.target}, id={target.id}")
             except Exception as e:
                 log.error(
                     f"[{self.actor_name}] Failed to parse target JSON: {e}, body: {body_str[:200]}"
@@ -202,8 +205,10 @@ class TargetConsumer(pykka.ThreadingActor):
                 return
 
             # Validate target
+            log.debug(f"[{self.actor_name}] Validating target {target.id}...")
             if not self._validate_target(target):
                 # Validation already emitted parse-error and acked
+                log.warning(f"[{self.actor_name}] Target validation failed for {target.id}")
                 channel.basic_ack(delivery_tag=method.delivery_tag)
                 return
 
@@ -214,9 +219,11 @@ class TargetConsumer(pykka.ThreadingActor):
 
             # Send ScanTarget message to tool actor
             # Include reference to self for ack callback
+            log.debug(f"[{self.actor_name}] Sending ScanTarget message to tool_actor (type={type(self.tool_actor)})")
             self.tool_actor.tell(
                 ScanTarget(target, method.delivery_tag, self.actor_ref)
             )
+            log.debug(f"[{self.actor_name}] ScanTarget message sent to tool_actor for {target.target}")
 
             # DO NOT ack yet - tool actor will tell us to ack after processing
 
