@@ -65,6 +65,7 @@
             python-ulid
             tomli
             dataclasses-json
+            dnspython
             starintel-doc-pkg
           ];
 

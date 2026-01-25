@@ -76,3 +76,11 @@ args = ["-silent", "-json"]
 bin = "katana"
 timeout_sec = 900
 args = ["-silent", "-json"]
+
+# DNS Resolver Configuration
+[dns_resolver]
+enabled = true
+queue = "bbp.dns-resolver.domains"
+prefetch = 5
+timeout_sec = 5
+# nameservers = ["8.8.8.8", "8.8.4.4"]  # Optional: custom DNS servers

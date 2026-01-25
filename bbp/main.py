@@ -14,6 +14,7 @@ from bbp.config import Config
 from bbp.rabbit import RabbitManager
 from bbp.publisher_pool import PublisherPool
 from bbp.consumer import TargetConsumer
+from bbp.dns_resolver import DnsResolverActor
 from bbp.events import create_event
 from bbp.tool_pool import create_tool_pools
 
@@ -110,6 +111,27 @@ def main():
             enabled_actors, routing_template
         )
 
+        # Declare DNS resolver queue if enabled
+        if "dns_resolver" in config.data and config.data["dns_resolver"].get("enabled", False):
+            log.info("Declaring DNS resolver queue...")
+            topology_conn = rabbit_manager.new_connection(connection_name="bbp.dns-topology")
+            try:
+                channel = topology_conn.channel()
+                dns_config = config.data["dns_resolver"]
+                queue_name = dns_config.get("queue", "bbp.dns-resolver.domains")
+                exchange_name = config.documents.get("exchange", "documents")
+                routing_key = "documents.new.domain"
+
+                log.info(f"Declaring DNS resolver queue: {queue_name} -> {routing_key}")
+                channel.queue_declare(queue=queue_name, durable=True)
+                channel.queue_bind(
+                    queue=queue_name, exchange=exchange_name, routing_key=routing_key
+                )
+                channel.close()
+            finally:
+                if topology_conn and topology_conn.is_open:
+                    topology_conn.close()
+
         # Start Publisher pool
         pool_size = config.service.get("publisher_pool_size", 3)
         log.info(f"Starting Publisher pool with {pool_size} workers...")
@@ -146,6 +168,20 @@ def main():
             tool_pool_proxies[tool_name] = proxy
             log.info(f"Started {tool_name} tool actor pool")
 
+        # Start DNS Resolver (if enabled)
+        dns_resolver_ref = None
+        dns_resolver = None
+        if "dns_resolver" in config.data and config.data["dns_resolver"].get("enabled", False):
+            log.info("Starting DNS Resolver...")
+            dns_resolver_ref = DnsResolverActor.start(
+                config.documents,
+                publisher,
+                config.data["dns_resolver"],
+                config.routing,
+            )
+            dns_resolver = dns_resolver_ref.proxy()
+            log.info("Started DNS resolver")
+
         # Start Target Consumers
         log.info("Starting Target Consumers...")
         consumers: List[Any] = []
@@ -174,7 +210,7 @@ def main():
         # Setup signal handlers for graceful shutdown
         def signal_handler(sig, frame):
             log.info(f"Received signal {sig}, shutting down...")
-            shutdown(consumer_refs, tool_pools, publisher_pool, rabbit_manager, config.routing, publisher)
+            shutdown(consumer_refs, tool_pools, publisher_pool, rabbit_manager, config.routing, publisher, dns_resolver_ref)
 
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
@@ -202,6 +238,7 @@ def shutdown(
     rabbit_manager: RabbitManager,
     routing_config: Dict[str, Any],
     publisher: Any,
+    dns_resolver_ref: Optional[Any] = None,
 ):
     """
     Graceful shutdown sequence.
@@ -213,6 +250,7 @@ def shutdown(
         rabbit_manager: RabbitManager instance
         routing_config: Routing configuration
         publisher: PublisherPoolProxy for event emission
+        dns_resolver_ref: Optional DnsResolverActor reference
     """
     log.info("Shutting down BBP Actor Service...")
 
@@ -223,6 +261,14 @@ def shutdown(
         "BBP Actor Service shutting down",
         routing_config,
     )
+
+    # Stop DNS resolver
+    if dns_resolver_ref:
+        log.info("Stopping DNS Resolver...")
+        try:
+            dns_resolver_ref.stop()
+        except Exception as e:
+            log.warning(f"Error stopping DNS resolver: {e}")
 
     # Stop consumers (stop receiving new targets)
     log.info("Stopping Target Consumers...")
