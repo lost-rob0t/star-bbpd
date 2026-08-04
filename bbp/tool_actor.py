@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pykka
 
+from bbp.document_boundary import CanonicalDocument, TargetDocument
 from bbp.events import create_event
 from bbp.publisher_pool import PublishDocument, PublishEvent, PublishRelation
 
@@ -18,7 +19,7 @@ log = logging.getLogger(__name__)
 class ScanTarget:
     """Message requesting a tool scan."""
 
-    target: Any
+    target: TargetDocument
     delivery_tag: int
     consumer_ref: Any
 
@@ -40,7 +41,9 @@ class ToolActor(pykka.ThreadingActor, ABC):
             log.warning("Unknown message type: %s", type(message))
         return None
 
-    def _execute_scan(self, target: Any, delivery_tag: int, consumer_ref: Any):
+    def _execute_scan(
+        self, target: TargetDocument, delivery_tag: int, consumer_ref: Any
+    ):
         doc_count = 0
         rel_count = 0
 
@@ -127,13 +130,13 @@ class ToolActor(pykka.ThreadingActor, ABC):
         consumer_ref.tell(AckMessage(delivery_tag))
 
     @abstractmethod
-    def _build_command(self, target: Any) -> List[str]:
+    def _build_command(self, target: TargetDocument) -> List[str]:
         raise NotImplementedError
 
     @abstractmethod
     def _parse_line(
-        self, line: str, target: Any, context: Dict[str, Any]
-    ) -> Optional[Tuple[Any, Any]]:
+        self, line: str, target: TargetDocument, context: Dict[str, Any]
+    ) -> Optional[Tuple[CanonicalDocument | None, CanonicalDocument | None]]:
         raise NotImplementedError
 
     def _require_routing(self) -> Dict[str, Any]:
@@ -141,12 +144,12 @@ class ToolActor(pykka.ThreadingActor, ABC):
             raise RuntimeError(f"[{self.actor_name}] routing config is unavailable")
         return self.routing
 
-    def _emit_document(self, doc: Any):
+    def _emit_document(self, doc: CanonicalDocument):
         routing = self._require_routing()
         routing_key = routing["document_ingest_key"].format(dtype=doc.dtype)
         self.publisher.tell(PublishDocument(doc, routing_key))
 
-    def _emit_relation(self, rel: Any):
+    def _emit_relation(self, rel: CanonicalDocument):
         routing = self._require_routing()
         routing_key = routing["document_ingest_key"].format(dtype="relation")
         self.publisher.tell(PublishRelation(rel, routing_key))

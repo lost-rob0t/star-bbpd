@@ -1,40 +1,30 @@
 #!/usr/bin/env python3
 
-import json
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import pika
 import pykka
 
+from bbp.document_boundary import DocumentBoundaryError, TargetDocument, decode_target
 from bbp.events import create_event
 from bbp.publisher_pool import PublishEvent
 from bbp.tool_actor import ScanTarget
-
-# Import starintel_doc for Target validation
-from starintel_doc.targets import Target
 
 log = logging.getLogger(__name__)
 
 
 @dataclass
 class AckMessage:
-    """Message to ack a RabbitMQ delivery"""
+    """Message to ack a RabbitMQ delivery."""
 
     delivery_tag: int
 
 
 class TargetConsumer(pykka.ThreadingActor):
-    """
-    Target consumer actor.
-
-    Consumes Target documents from RabbitMQ queue, validates them,
-    and forwards to ToolActor for processing.
-
-    Runs pika consumer in separate daemon thread.
-    """
+    """Consume strict 0.9 target documents and dispatch validated work."""
 
     def __init__(
         self,
@@ -58,11 +48,10 @@ class TargetConsumer(pykka.ThreadingActor):
         self.connection = None
         self.channel = None
         self._stop_consuming = False
-        self._pending_acks: Dict[int, bool] = {}  # delivery_tag -> should_ack
+        self._pending_acks: Dict[int, bool] = {}
         self._conn_lock = threading.Lock()
 
     def _call_in_consume_thread(self, fn) -> bool:
-        """Run `fn` on the consume thread safely (pika channel is not thread-safe)."""
         with self._conn_lock:
             conn = self.connection
         if not conn:
@@ -70,66 +59,54 @@ class TargetConsumer(pykka.ThreadingActor):
         try:
             conn.add_callback_threadsafe(fn)
             return True
-        except Exception as e:
-            log.debug("[%s] add_callback_threadsafe failed: %s", self.actor_name, e)
+        except Exception as exc:
+            log.debug("[%s] add_callback_threadsafe failed: %s", self.actor_name, exc)
             return False
 
     def on_start(self):
-        """Start consume thread when actor starts"""
-        log.info(f"[{self.actor_name}] Starting TargetConsumer")
+        log.info("[%s] Starting TargetConsumer", self.actor_name)
         self._stop_consuming = False
         self.consume_thread = threading.Thread(
-            target=self._consume_loop, daemon=True, name=f"consumer-{self.actor_name}"
+            target=self._consume_loop,
+            daemon=True,
+            name=f"consumer-{self.actor_name}",
         )
         self.consume_thread.start()
 
     def on_stop(self):
-        """Stop consume thread when actor stops"""
-        log.info(f"[{self.actor_name}] Stopping TargetConsumer")
+        log.info("[%s] Stopping TargetConsumer", self.actor_name)
         self._stop_consuming = True
 
-        # Try to stop consuming gracefully, but ignore pika errors during shutdown
         if self.channel and self.channel.is_open:
             try:
                 self.channel.stop_consuming()
-            except Exception as e:
-                # Ignore pika connection errors during shutdown - these are expected
-                if "pop from an empty deque" in str(e) or "StreamLostError" in str(e):
-                    log.debug(f"[{self.actor_name}] Ignoring expected pika shutdown error: {e}")
+            except Exception as exc:
+                if "pop from an empty deque" in str(exc) or "StreamLostError" in str(exc):
+                    log.debug("[%s] Ignoring expected shutdown error: %s", self.actor_name, exc)
                 else:
-                    log.warning(f"[{self.actor_name}] Error stopping consumer: {e}")
+                    log.warning("[%s] Error stopping consumer: %s", self.actor_name, exc)
 
-        # Wait for thread to finish
         if self.consume_thread and self.consume_thread.is_alive():
             self.consume_thread.join(timeout=5)
 
-        # Close connection if still open (ignore errors)
         if self.connection and self.connection.is_open:
             try:
                 self.connection.close()
-            except Exception as e:
-                if "pop from an empty deque" in str(e) or "StreamLostError" in str(e):
-                    log.debug(f"[{self.actor_name}] Ignoring expected pika connection close error: {e}")
+            except Exception as exc:
+                if "pop from an empty deque" in str(exc) or "StreamLostError" in str(exc):
+                    log.debug("[%s] Ignoring expected close error: %s", self.actor_name, exc)
                 else:
-                    log.warning(f"[{self.actor_name}] Error closing connection: {e}")
+                    log.warning("[%s] Error closing connection: %s", self.actor_name, exc)
 
     def on_receive(self, message):
-        """Handle incoming messages"""
         if isinstance(message, AckMessage):
             self._handle_ack(message.delivery_tag)
         else:
-            log.warning(f"[{self.actor_name}] Unknown message type: {type(message)}")
-
+            log.warning("[%s] Unknown message type: %s", self.actor_name, type(message))
         return None
 
     def _consume_loop(self):
-        """
-        Consume loop (runs in separate thread).
-
-        Creates its own RabbitMQ connection and blocks on start_consuming().
-        """
         try:
-            # Create dedicated connection for this consumer (thread-safe)
             params = pika.ConnectionParameters(
                 host=self.rabbit_config.get("host", "localhost"),
                 port=self.rabbit_config.get("port", 5672),
@@ -141,160 +118,89 @@ class TargetConsumer(pykka.ThreadingActor):
                 heartbeat=self.rabbit_config.get("heartbeat_sec", 30),
             )
 
-            log.debug(f"[{self.actor_name}] Creating dedicated RabbitMQ connection")
+            log.debug("[%s] Creating dedicated RabbitMQ connection", self.actor_name)
             self.connection = pika.BlockingConnection(params)
             self.channel = self.connection.channel()
-
-            # Set prefetch
             self.channel.basic_qos(prefetch_count=self.prefetch)
-
-            # Start consuming
-            log.info(
-                f"[{self.actor_name}] Consuming from queue: {self.queue_name} (prefetch={self.prefetch})"
-            )
             self.channel.basic_consume(
                 queue=self.queue_name,
                 on_message_callback=self._handle_target,
-                auto_ack=False,  # Manual ack
+                auto_ack=False,
             )
-
-            # Block on consuming (until stop_consuming called)
             self.channel.start_consuming()
-
-        except Exception as e:
-            log.error(
-                f"[{self.actor_name}] Error in consume loop: {e}", exc_info=True
-            )
+        except Exception as exc:
+            log.error("[%s] Error in consume loop: %s", self.actor_name, exc, exc_info=True)
         finally:
-            # Close connection on exit
             if self.connection and self.connection.is_open:
                 try:
                     self.connection.close()
-                    log.debug(f"[{self.actor_name}] Closed RabbitMQ connection")
-                except Exception as e:
-                    log.warning(f"[{self.actor_name}] Error closing connection: {e}")
+                except Exception as exc:
+                    log.warning("[%s] Error closing connection: %s", self.actor_name, exc)
+        log.info("[%s] Consume loop exited", self.actor_name)
 
-        log.info(f"[{self.actor_name}] Consume loop exited")
-
-    def _handle_target(self, channel, method, properties, body):
-        """
-        Handle incoming target message from RabbitMQ.
-
-        Args:
-            channel: pika channel
-            method: pika method (contains delivery_tag)
-            properties: pika properties
-            body: message body (bytes)
-        """
-        log.debug(f"[{self.actor_name}] _handle_target called with delivery_tag={method.delivery_tag}")
+    def _handle_target(self, channel, method, _properties, body):
+        log.debug(
+            "[%s] Received target delivery_tag=%s body_length=%s",
+            self.actor_name,
+            method.delivery_tag,
+            len(body),
+        )
         try:
-            # Decode body
-            body_str = body.decode("utf-8")
-            log.debug(f"[{self.actor_name}] Decoded message body: {body_str[:100]}...")
-
-            # Parse JSON to Target object
             try:
-                target = Target.from_json(body_str)
-                log.debug(f"[{self.actor_name}] Parsed target: dtype={target.dtype}, actor={target.actor}, target={target.target}, id={target.id}")
-            except Exception as e:
-                log.error(
-                    f"[{self.actor_name}] Failed to parse target JSON: {e}, body: {body_str[:200]}"
-                )
-                self._emit_parse_error(f"Failed to parse JSON: {str(e)}", "")
+                target = decode_target(body)
+            except DocumentBoundaryError as exc:
+                log.warning("[%s] Target rejected (%s): %s", self.actor_name, exc.category, exc)
+                self._emit_parse_error(exc.category, str(exc), "")
                 channel.basic_ack(delivery_tag=method.delivery_tag)
                 return
 
-            # Validate target
-            log.debug(f"[{self.actor_name}] Validating target {target.id}...")
             if not self._validate_target(target):
-                # Validation already emitted parse-error and acked
-                log.warning(f"[{self.actor_name}] Target validation failed for {target.id}")
                 channel.basic_ack(delivery_tag=method.delivery_tag)
                 return
 
-            # Forward to tool actor
             log.info(
-                f"[{self.actor_name}] Received target: {target.target} (id={target.id})"
+                "[%s] Received target: %s (id=%s)",
+                self.actor_name,
+                target.target,
+                target.id,
             )
-
-            # Send ScanTarget message to tool actor
-            # Include reference to self for ack callback
-            log.debug(f"[{self.actor_name}] Sending ScanTarget message to tool_actor (type={type(self.tool_actor)})")
-            self.tool_actor.tell(
-                ScanTarget(target, method.delivery_tag, self.actor_ref)
-            )
-            log.debug(f"[{self.actor_name}] ScanTarget message sent to tool_actor for {target.target}")
-
-            # DO NOT ack yet - tool actor will tell us to ack after processing
-
-        except Exception as e:
-            log.error(
-                f"[{self.actor_name}] Error handling target: {e}", exc_info=True
-            )
-            # Ack to prevent poison loop
+            self.tool_actor.tell(ScanTarget(target, method.delivery_tag, self.actor_ref))
+        except Exception as exc:
+            log.error("[%s] Error handling target: %s", self.actor_name, exc, exc_info=True)
             channel.basic_ack(delivery_tag=method.delivery_tag)
 
-    def _validate_target(self, target: Target) -> bool:
-        """
-        Validate target document.
-
-        Args:
-            target: Target object
-
-        Returns:
-            True if valid, False otherwise (emits parse-error)
-        """
-        # Check dtype
-        if not hasattr(target, "dtype") or target.dtype != "target":
+    def _validate_target(self, target: TargetDocument) -> bool:
+        if target.actor != self.actor_name:
             self._emit_parse_error(
-                f"Invalid dtype: expected 'target', got '{getattr(target, 'dtype', 'missing')}'",
-                getattr(target, "id", ""),
+                "target_actor_mismatch",
+                f"expected actor {self.actor_name!r}, got {target.actor!r}",
+                target.id,
             )
             return False
-
-        # Check actor matches
-        if not hasattr(target, "actor") or target.actor != self.actor_name:
-            self._emit_parse_error(
-                f"Actor mismatch: expected '{self.actor_name}', got '{getattr(target, 'actor', 'missing')}'",
-                getattr(target, "id", ""),
-            )
-            return False
-
-        # Check required fields
-        if not hasattr(target, "target") or not target.target:
-            self._emit_parse_error(
-                "Missing required field: 'target'", getattr(target, "id", "")
-            )
-            return False
-
         return True
 
-    def _emit_parse_error(self, details: str, source_id: str):
-        """
-        Emit parse-error event.
-
-        Args:
-            details: Error details
-            source_id: Source document ID (if available)
-        """
-        event = create_event(self.actor_name, "parse-error", details, source_id)
+    def _emit_parse_error(self, category: str, details: str, source_id: str):
+        event = create_event(
+            self.actor_name,
+            "parse-error",
+            f"category={category}; {details}",
+            source_id,
+        )
         routing_key = self.routing_config["event_key"].format(eventType="parse-error")
         self.publisher.tell(PublishEvent(event, routing_key))
-        log.warning(f"[{self.actor_name}] Parse error: {details}")
 
     def _handle_ack(self, delivery_tag: int):
-        """
-        Handle ack request from tool actor.
-
-        Args:
-            delivery_tag: RabbitMQ delivery tag to ack
-        """
         def _do_ack():
             try:
                 if self.channel and self.channel.is_open:
                     self.channel.basic_ack(delivery_tag=delivery_tag)
-            except Exception as e:
-                log.error("[%s] Failed to ack delivery_tag=%s: %s", self.actor_name, delivery_tag, e)
+            except Exception as exc:
+                log.error(
+                    "[%s] Failed to ack delivery_tag=%s: %s",
+                    self.actor_name,
+                    delivery_tag,
+                    exc,
+                )
 
         if not self._call_in_consume_thread(_do_ack):
             log.warning("[%s] Ack dropped; connection not ready", self.actor_name)

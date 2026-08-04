@@ -3,77 +3,63 @@
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from bbp.document_boundary import (
+    CanonicalDocument,
+    TargetDocument,
+    build_domain,
+    build_relation,
+)
 from bbp.tool_actor import ToolActor
-from bbp.util import propagate_sources, propagate_dataset
-
-from starintel_doc.hosts import Domain
-from starintel_doc.relations import Relation
 
 log = logging.getLogger(__name__)
 
 
 class SubfinderActor(ToolActor):
-    """
-    Subfinder tool actor.
+    """Discover subdomains and emit strict 0.9 domains and relations."""
 
-    Consumes domain targets, runs subfinder, emits:
-      - a root Domain doc for the target domain (once per scan)
-      - Domain docs for discovered subdomains
-      - Relation: root_domain -> subdomain (NOT target -> subdomain)
-    """
-
-    def _build_command(self, target: Any) -> List[str]:
+    def _build_command(self, target: TargetDocument) -> List[str]:
         bin_path = self.tool_config.get("bin", "subfinder")
         args = self.tool_config.get("args", [])
-
         cmd = [bin_path]
-
         if "-d" not in args:
             cmd.extend(args)
             cmd.extend(["-d", target.target])
         else:
             cmd.extend([arg if arg != "{target}" else target.target for arg in args])
-
         return cmd
 
-    def _make_domain_doc(self, domain_str: str, target: Any) -> Domain:
-        dataset = propagate_dataset(target)
-        sources = propagate_sources(target, "subfinder")
+    def _make_domain_doc(
+        self, domain_str: str, target: TargetDocument
+    ) -> CanonicalDocument:
+        return build_domain(domain_str, target, "subfinder")
 
-        doc = Domain(
-            record_type="A",
-            record=domain_str,
-            resolved_addresses=[],
-            dataset=dataset,
-            sources=sources,
-        )
-        doc.set_meta(dataset)
-        return doc
-
-    def _pre_scan(self, target: Any, context: Dict[str, Any]) -> Tuple[int, int]:
-        root_str = (getattr(target, "target", "") or "").strip()
+    def _pre_scan(self, target: TargetDocument, context: Dict[str, Any]) -> Tuple[int, int]:
+        root_str = target.target.strip()
         if not root_str:
             return (0, 0)
 
         root_domain = self._make_domain_doc(root_str, target)
         context["root_domain"] = root_domain
         context["seen_domains"] = {root_str}
-
         self._emit_document(root_domain)
-        log.info(f"[{self.actor_name}] Emitted root domain for target: {root_str} ({root_domain.id})")
-
+        log.info(
+            "[%s] Emitted root domain for target: %s (%s)",
+            self.actor_name,
+            root_str,
+            root_domain.id,
+        )
         return (1, 0)
 
     def _parse_line(
-        self, line: str, target: Any, context: Dict[str, Any]
-    ) -> Optional[Tuple[Any, Any]]:
+        self, line: str, target: TargetDocument, context: Dict[str, Any]
+    ) -> Optional[Tuple[CanonicalDocument | None, CanonicalDocument | None]]:
         domain_str = line.strip()
         if not domain_str:
             return None
 
         root_domain = context.get("root_domain")
         if root_domain is None:
-            root_str = (getattr(target, "target", "") or "").strip()
+            root_str = target.target.strip()
             if not root_str:
                 return None
             root_domain = self._make_domain_doc(root_str, target)
@@ -87,15 +73,12 @@ class SubfinderActor(ToolActor):
         seen.add(domain_str)
 
         subdomain = self._make_domain_doc(domain_str, target)
-
-        relation = Relation(
-            source=root_domain.id,
-            target=subdomain.id,
-            predicate="subdomain",
-            note="subdomain",
-            dataset=propagate_dataset(target),
-            sources=propagate_sources(target, "subfinder"),
+        relation = build_relation(
+            root_domain.id,
+            subdomain.id,
+            "subdomain",
+            "subdomain",
+            target,
+            "subfinder",
         )
-        relation.set_meta(propagate_dataset(target))
-
         return (subdomain, relation)

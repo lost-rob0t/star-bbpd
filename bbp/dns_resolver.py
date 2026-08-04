@@ -8,15 +8,21 @@ import dns.resolver
 import pika
 import pykka
 
+from bbp.document_boundary import (
+    CanonicalDocument,
+    DocumentBoundaryError,
+    decode_domain,
+    domain_name,
+    with_domain_addresses,
+)
 from bbp.events import create_event
 from bbp.publisher_pool import PublishDocument, PublishEvent
-from starintel_doc.hosts import Domain
 
 log = logging.getLogger(__name__)
 
 
 class DnsResolverActor(pykka.ThreadingActor):
-    """Resolve persisted domain documents and publish document updates."""
+    """Resolve persisted strict 0.9 domain documents and publish updates."""
 
     def __init__(
         self,
@@ -103,15 +109,10 @@ class DnsResolverActor(pykka.ThreadingActor):
 
     def _handle_domain(self, channel, method, _properties, body):
         try:
-            body_str = body.decode("utf-8")
             try:
-                domain = Domain.from_json(body_str)
-            except Exception as exc:
-                self._emit_parse_error(f"Failed to parse JSON: {exc}", "")
-                channel.basic_ack(delivery_tag=method.delivery_tag)
-                return
-
-            if not self._validate_domain(domain):
+                domain = decode_domain(body)
+            except DocumentBoundaryError as exc:
+                self._emit_parse_error(exc.category, str(exc), "")
                 channel.basic_ack(delivery_tag=method.delivery_tag)
                 return
 
@@ -127,28 +128,16 @@ class DnsResolverActor(pykka.ThreadingActor):
             log.error("[dns-resolver] Domain handling failed: %s", exc, exc_info=True)
             channel.basic_ack(delivery_tag=method.delivery_tag)
 
-    def _validate_domain(self, domain: Domain) -> bool:
-        if getattr(domain, "dtype", None) != "domain":
-            self._emit_parse_error(
-                f"Invalid dtype: expected 'domain', got {getattr(domain, 'dtype', 'missing')!r}",
-                getattr(domain, "id", ""),
-            )
-            return False
-        if not getattr(domain, "record", None):
-            self._emit_parse_error(
-                "Missing required field: 'record'", getattr(domain, "id", "")
-            )
-            return False
-        return True
-
-    def _resolve_domain(self, domain: Domain) -> Optional[Domain]:
-        addresses = []
+    def _resolve_domain(
+        self, domain: CanonicalDocument
+    ) -> Optional[CanonicalDocument]:
+        name = domain_name(domain)
+        addresses: list[str] = []
         try:
             for record_type in ("A", "AAAA"):
                 try:
                     addresses.extend(
-                        str(value)
-                        for value in self.resolver.resolve(domain.record, record_type)
+                        str(value) for value in self.resolver.resolve(name, record_type)
                     )
                 except (
                     dns.resolver.NXDOMAIN,
@@ -157,25 +146,25 @@ class DnsResolverActor(pykka.ThreadingActor):
                 ):
                     continue
 
-            domain.resolved_addresses = addresses
+            updated = with_domain_addresses(domain, addresses)
             event_type = "dns-resolved" if addresses else "dns-no-records"
             details = (
-                f"Resolved {len(addresses)} addresses for {domain.record}"
+                f"Resolved {len(addresses)} addresses for {name}"
                 if addresses
-                else f"No DNS records found for {domain.record}"
+                else f"No DNS records found for {name}"
             )
             self._emit_event(event_type, details, domain.id)
-            return domain
+            return updated
         except Exception as exc:
             self._emit_event(
                 "dns-error",
-                f"DNS resolution failed for {domain.record}: {exc}",
+                f"DNS resolution failed for {name}: {exc}",
                 domain.id,
             )
             return None
 
-    def _emit_parse_error(self, details: str, source_id: str):
-        self._emit_event("parse-error", details, source_id)
+    def _emit_parse_error(self, category: str, details: str, source_id: str):
+        self._emit_event("parse-error", f"category={category}; {details}", source_id)
 
     def _emit_event(self, event_type: str, details: str, source_id: str):
         event = create_event(self.actor_name, event_type, details, source_id)

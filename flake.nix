@@ -4,18 +4,24 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    starintel-doc = {
-      url = "github:lost-rob0t/starintel-doc";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, starintel-doc }:
+  outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
         python = pkgs.python3;
         pythonPackages = python.pkgs;
+
+        starintelDocSrc = builtins.fetchGit {
+          url = "https://github.com/lost-rob0t/starintel-doc.git";
+          rev = "980f7a217a0d28f22508c2f05831ceb2fefe8bd0";
+        };
+
+        starintelSchemaSrc = builtins.fetchGit {
+          url = "https://github.com/lost-rob0t/starintel-gpt-auto-dig.git";
+          rev = "ff814ff63868286d68e21502122832802cd5e361";
+        };
 
         tools = with pkgs; [
           subfinder
@@ -24,26 +30,48 @@
           nmap
         ];
 
-        # Rebuild starintel-doc with our Python version
-        starintel-doc-pkg = pythonPackages.buildPythonPackage rec {
-          pname = "starintel_doc";
-          version = "0.8.2";
+        ulid-py = pythonPackages.buildPythonPackage {
+          pname = "ulid-py";
+          version = "1.1.0";
           format = "setuptools";
 
-          src = starintel-doc;
+          src = pkgs.fetchPypi {
+            pname = "ulid-py";
+            version = "1.1.0";
+            hash = "sha256-3GiEvpFVjfB3wwEbn7DIfRCXy4/GU0sR8xAWGv1XOPA=";
+          };
 
-          propagatedBuildInputs = with pythonPackages; [
-            python-ulid
-            dataclasses-json
+          nativeBuildInputs = with pythonPackages; [
+            setuptools
           ];
 
           doCheck = false;
+          pythonImportsCheck = [ "ulid" ];
+        };
 
-          meta = with pkgs.lib; {
-            description = "Document Spec for Star intel";
-            homepage = "https://github.com/lost-rob0t/starintel_doc";
-            license = licenses.mit;
-          };
+        starintel-doc-pkg = pythonPackages.buildPythonPackage {
+          pname = "starintel_doc";
+          version = "0.9.0";
+          format = "pyproject";
+          src = starintelDocSrc;
+
+          nativeBuildInputs = with pythonPackages; [
+            setuptools
+          ];
+
+          propagatedBuildInputs = with pythonPackages; [
+            ulid-py
+            dataclasses-json
+            jsonschema
+          ];
+
+          doCheck = true;
+          checkPhase = ''
+            export STARINTEL_CONFORMANCE_ROOT=${starintelSchemaSrc}
+            ${python.interpreter} -m unittest discover -s tests
+          '';
+
+          pythonImportsCheck = [ "starintel_doc" ];
         };
 
         star-bbpd = pythonPackages.buildPythonPackage {
@@ -54,26 +82,36 @@
 
           nativeBuildInputs = with pythonPackages; [
             setuptools
-            setuptools-scm
+            wheel
           ] ++ [
             pkgs.makeWrapper
+          ];
+
+          nativeCheckInputs = with pythonPackages; [
+            pytest
           ];
 
           propagatedBuildInputs = with pythonPackages; [
             pika
             pykka
-            python-ulid
+            ulid-py
             tomli
-            dataclasses-json
             dnspython
             starintel-doc-pkg
           ];
 
-          dontCheckRuntimeDeps = true;
+          doCheck = true;
+          checkPhase = ''
+            export STARINTEL_CONFORMANCE_ROOT=${starintelSchemaSrc}
+            pytest -q
+          '';
+
+          pythonImportsCheck = [ "bbp.document_boundary" ];
 
           postFixup = ''
             wrapProgram $out/bin/star-bbpd \
-              --prefix PATH : ${pkgs.lib.makeBinPath tools}
+              --prefix PATH : ${pkgs.lib.makeBinPath tools} \
+              --set STARINTEL_CONFORMANCE_ROOT ${starintelSchemaSrc}
           '';
 
           meta = with pkgs.lib; {
@@ -85,22 +123,25 @@
       {
         packages.default = star-bbpd;
         packages.star-bbpd = star-bbpd;
+        checks.default = star-bbpd;
 
         devShells.default = pkgs.mkShell {
           buildInputs = with pythonPackages; [
             python
             pika
             pykka
-            python-ulid
+            ulid-py
             tomli
-            dataclasses-json
             dnspython
             starintel-doc-pkg
             pytest
-            black
-            flake8
-            mypy
+            ruff
+            build
           ] ++ tools;
+
+          shellHook = ''
+            export STARINTEL_CONFORMANCE_ROOT=${starintelSchemaSrc}
+          '';
         };
 
         apps.default = {
