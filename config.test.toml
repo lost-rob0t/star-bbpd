@@ -1,17 +1,18 @@
-# BBP Actor Service Test Configuration
-# This config enables only subfinder for initial testing
+# Local BBP Actor Service test configuration.
 
 [service]
 name = "bbp-actors-test"
 log_level = "DEBUG"
 json_pretty = false
+publisher_pool_size = 1
+tool_pool_size = 1
 
 [documents]
-host = "bots.star.intel"
+host = "localhost"
 port = 5672
 vhost = "/"
-username = "guest"
-password = "guest"
+username = "bbp-local"
+password = "replace-me"
 exchange = "documents"
 exchange_type = "topic"
 heartbeat_sec = 30
@@ -22,13 +23,14 @@ exchange_type = "topic"
 
 [routing]
 target_key = "actors.{actor}.new.target"
-doc_key = "document.new.{dtype}"
+document_ingest_key = "documents.ingest.{dtype}"
+document_update_key = "documents.updated.{dtype}"
+document_new_key = "documents.new.{dtype}"
 event_key = "event.{eventType}"
 
-# Only Subfinder enabled for testing
 [actors.subfinder]
 enabled = true
-queue = "actor.subfinder.new.target"
+queue = "bbp.subfinder.targets"
 prefetch = 1
 emit_relations = true
 
@@ -37,7 +39,6 @@ bin = "subfinder"
 timeout_sec = 300
 args = ["-silent"]
 
-# Other actors disabled for testing
 [actors.nmap]
 enabled = false
 queue = "bbp.nmap.targets"

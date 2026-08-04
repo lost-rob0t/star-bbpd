@@ -1,19 +1,19 @@
-# BBP Actor Service Configuration
+# Copy this file to config.toml and set local credentials.
+# config.toml is intentionally ignored by Git.
 
 [service]
 name = "bbp-actors"
 log_level = "INFO"
-log_file = "/tmp/bbp-actors.log"  # Path to log file (omit or set to "" for stdout only)
 json_pretty = false
 publisher_pool_size = 3
 tool_pool_size = 2
 
 [documents]
-host = "bots.star.intel"
+host = "localhost"
 port = 5672
 vhost = "/"
-username = "guest"
-password = "guest"
+username = "bbp-local"
+password = "replace-me"
 exchange = "documents"
 exchange_type = "topic"
 heartbeat_sec = 30
@@ -24,10 +24,11 @@ exchange_type = "topic"
 
 [routing]
 target_key = "actors.{actor}.new.target"
-doc_key = "documents.new.{dtype}"
+document_ingest_key = "documents.ingest.{dtype}"
+document_update_key = "documents.updated.{dtype}"
+document_new_key = "documents.new.{dtype}"
 event_key = "event.{eventType}"
 
-# Actor Configurations
 [actors]
 
 [actors.subfinder]
@@ -54,7 +55,6 @@ queue = "bbp.katana.targets"
 prefetch = 3
 emit_relations = true
 
-# Tool Configurations
 [tools]
 
 [tools.subfinder]
@@ -77,10 +77,9 @@ bin = "katana"
 timeout_sec = 900
 args = ["-silent", "-json"]
 
-# DNS Resolver Configuration
 [dns_resolver]
 enabled = true
 queue = "bbp.dns-resolver.domains"
 prefetch = 5
 timeout_sec = 5
-# nameservers = ["8.8.8.8", "8.8.4.4"]  # Optional: custom DNS servers
+# nameservers = ["1.1.1.1", "1.0.0.1"]

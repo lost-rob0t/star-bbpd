@@ -21,9 +21,16 @@ wheels/
 *.egg
 
 # Virtual environments
+.venv/
 venv/
 ENV/
 env/
+
+# Local configuration and secrets
+config.toml
+.env
+.env.*
+!.env.example
 
 # IDEs
 .vscode/
@@ -38,7 +45,9 @@ result-*
 
 # Testing
 .pytest_cache/
+.ruff_cache/
 .coverage
+coverage.xml
 htmlcov/
 
 # OS
