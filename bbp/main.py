@@ -17,6 +17,7 @@ from bbp.events import create_event
 from bbp.publisher_pool import PublishEvent, PublisherPool, PublisherPoolProxy
 from bbp.rabbit import RabbitManager
 from bbp.tool_pool import create_tool_pools
+from bbp.topology import build_topology
 
 log = logging.getLogger(__name__)
 
@@ -50,32 +51,6 @@ def emit_service_event(
     publisher.tell(PublishEvent(event, routing_key))
 
 
-def declare_dns_queue(rabbit_manager: RabbitManager, config: Config) -> None:
-    dns_config = config.data.get("dns_resolver", {})
-    if not dns_config.get("enabled", False):
-        return
-
-    connection = rabbit_manager.new_connection(connection_name="bbp.dns-topology")
-    channel = None
-    try:
-        channel = connection.channel()
-        queue_name = dns_config.get("queue", "bbp.dns-resolver.domains")
-        exchange_name = config.documents.get("exchange", "documents")
-        routing_key = config.routing["document_new_key"].format(dtype="domain")
-        channel.queue_declare(queue=queue_name, durable=True)
-        channel.queue_bind(
-            queue=queue_name,
-            exchange=exchange_name,
-            routing_key=routing_key,
-        )
-        log.info("Declared DNS queue %s -> %s", queue_name, routing_key)
-    finally:
-        if channel and channel.is_open:
-            channel.close()
-        if connection.is_open:
-            connection.close()
-
-
 def main() -> None:
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.toml"
 
@@ -89,12 +64,7 @@ def main() -> None:
         rabbit_manager = RabbitManager(config.documents)
         if not rabbit_manager.connect():
             raise RuntimeError("failed to connect to RabbitMQ")
-
-        enabled_actors = [
-            (name, config.get_actor_config(name)) for name in config.enabled_actors()
-        ]
-        rabbit_manager.declare_topology(enabled_actors, config.routing["target_key"])
-        declare_dns_queue(rabbit_manager, config)
+        rabbit_manager.declare_topology(build_topology(config))
 
         publisher_pool = PublisherPool(
             rabbit_manager,

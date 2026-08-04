@@ -16,6 +16,30 @@ from bbp.rabbit import RabbitManager
 
 log = logging.getLogger(__name__)
 
+JSON_CONTENT_TYPE = "application/json"
+JSON_CONTENT_ENCODING = "utf-8"
+
+
+def document_properties(dtype: str) -> pika.BasicProperties:
+    """Build persistent JSON properties using the canonical document dtype."""
+    if not isinstance(dtype, str) or not dtype:
+        raise ValueError("document dtype must be a non-empty string")
+    return pika.BasicProperties(
+        content_type=JSON_CONTENT_TYPE,
+        content_encoding=JSON_CONTENT_ENCODING,
+        delivery_mode=2,
+        type=dtype,
+    )
+
+
+def event_properties() -> pika.BasicProperties:
+    """Build persistent UTF-8 JSON properties for actor events."""
+    return pika.BasicProperties(
+        content_type=JSON_CONTENT_TYPE,
+        content_encoding=JSON_CONTENT_ENCODING,
+        delivery_mode=2,
+    )
+
 
 @dataclass
 class PublishDocument:
@@ -119,11 +143,7 @@ class PublisherWorker(pykka.ThreadingActor):
                 exchange=self.documents_exchange,
                 routing_key=routing_key,
                 body=body,
-                properties=pika.BasicProperties(
-                    content_type="application/json",
-                    delivery_mode=2,  # persistent
-                    type=doc.dtype,
-                ),
+                properties=document_properties(doc.dtype),
             )
             log.debug(
                 f"[Publisher-{self.worker_id}] Published document: {doc.dtype} ({doc.id if hasattr(doc, 'id') else 'unknown'}) -> {routing_key}"
@@ -141,11 +161,7 @@ class PublisherWorker(pykka.ThreadingActor):
                 exchange=self.documents_exchange,
                 routing_key=routing_key,
                 body=body,
-                properties=pika.BasicProperties(
-                    content_type="application/json",
-                    delivery_mode=2,  # persistent
-                    type="relation",
-                ),
+                properties=document_properties(rel.dtype),
             )
             log.debug(
                 f"[Publisher-{self.worker_id}] Published relation: {rel.predicate} ({rel.source} -> {rel.target}) -> {routing_key}"
@@ -170,10 +186,7 @@ class PublisherWorker(pykka.ThreadingActor):
                 exchange=self.events_exchange,
                 routing_key=routing_key,
                 body=body,
-                properties=pika.BasicProperties(
-                    content_type="application/json",
-                    delivery_mode=2,  # persistent
-                ),
+                properties=event_properties(),
             )
             log.debug(
                 f"[Publisher-{self.worker_id}] Published event: {event['eventType']} ({event['actorName']}) -> {routing_key}"

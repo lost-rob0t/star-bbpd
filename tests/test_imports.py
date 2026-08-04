@@ -11,6 +11,8 @@ import pytest
         "bbp.dns_resolver",
         "bbp.document_boundary",
         "bbp.publisher_pool",
+        "bbp.rabbit",
+        "bbp.topology",
         "bbp.tool_actor",
         "bbp.tool_pool",
         "bbp.tools.httpx",
