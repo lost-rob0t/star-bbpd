@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 import pika
 from pika.exceptions import AMQPConnectionError, AMQPChannelError
 
+from bbp.topology import TopologyPlan, declare_topology
+
 log = logging.getLogger(__name__)
 
 
@@ -138,47 +140,26 @@ class RabbitManager:
 
             return self._consume_channels[name]
 
-    def declare_topology(self, enabled_actors: list, routing_template: str):
+    def declare_topology(self, plan: TopologyPlan):
         """
-        Declare RabbitMQ exchanges, queues, and bindings.
+        Declare every BBPD exchange, queue, and binding from one topology plan.
 
         Uses a short-lived connection/channel for topology declaration.
         This is safe since topology is declared once at startup in a single thread.
-
-        Args:
-            enabled_actors: List of (actor_name, actor_config) tuples
-            routing_template: Template for routing key (e.g., "actors.{actor}.new.target")
         """
         log.info("Declaring RabbitMQ topology with short-lived connection")
 
-        # Create a short-lived connection for topology declaration
         topology_conn = self.new_connection(connection_name="bbp.topology")
         channel = None
         try:
             channel = topology_conn.channel()
-
-            # Declare documents exchange
-            exchange_name = self.config.get("exchange", "documents")
-            exchange_type = self.config.get("exchange_type", "topic")
-            log.info(f"Declaring exchange: {exchange_name} (type: {exchange_type})")
-            channel.exchange_declare(
-                exchange=exchange_name, exchange_type=exchange_type, durable=True
+            declare_topology(channel, plan)
+            log.info(
+                "RabbitMQ topology declared successfully: %s exchanges, %s bindings",
+                len(plan.exchanges),
+                len(plan.bindings),
             )
-
-            # Declare queues and bindings for each enabled actor
-            for actor_name, actor_config in enabled_actors:
-                queue_name = actor_config.get("queue", f"bbp.{actor_name}.targets")
-                routing_key = routing_template.format(actor=actor_name)
-
-                log.info(f"Declaring queue: {queue_name} -> {routing_key}")
-                channel.queue_declare(queue=queue_name, durable=True)
-                channel.queue_bind(
-                    queue=queue_name, exchange=exchange_name, routing_key=routing_key
-                )
-
-            log.info("RabbitMQ topology declared successfully")
         finally:
-            # Clean up short-lived connection
             try:
                 if channel and channel.is_open:
                     channel.close()

@@ -13,6 +13,7 @@ The service is migrating through epic #1 in dependency order. The current implem
 - canonical 0.9 domain, host, URL, target, and relation builders;
 - durable new-document routing through `documents.ingest.<dtype>`;
 - domain updates through `documents.updated.domain`;
+- one centralized durable RabbitMQ topology plan;
 - local-only runtime configuration and a stable CI quality gate.
 
 Publisher-confirmed ACK settlement, deterministic relation identity, recursive provenance, and the tool-runner lifecycle remain separate follow-up issues.
@@ -30,24 +31,6 @@ The contract is pinned to:
 - schema revision: `0.9.0+fields.20260726.2`.
 
 The boundary rejects unsupported schema versions, dtype aliases, undeclared fields, wrong types, malformed RFC 3339 timestamps, and missing BBPD target fields. It does not silently normalize flat 0.8 input.
-
-All emitted documents use the canonical envelope:
-
-```json
-{
-  "_id": "...",
-  "dataset": "scan-a",
-  "dtype": "domain",
-  "schema_version": "0.9.0",
-  "version": 1,
-  "date_added": "2026-08-04T20:00:00Z",
-  "date_updated": "2026-08-04T20:00:00Z",
-  "sources": [{"kind": "tool", "name": "subfinder"}],
-  "evidence": [],
-  "data": {"domain": "example.com"},
-  "extensions": {}
-}
-```
 
 Nmap service observations are embedded values in `host.data.ports` using `port`, `name`, and `version`. They are not standalone document types.
 
@@ -117,7 +100,27 @@ event_key = "event.{eventType}"
 | `documents.new.<dtype>` | Notify consumers after server persistence |
 | `event.<eventType>` | Deliver actor lifecycle and failure events |
 
-Do not publish new findings directly to `documents.new.*`; that route is event-only.
+### Message flow
+
+```text
+producer
+  -> documents.ingest.target
+  -> star-server persists target in CouchDB
+  -> documents.new.target
+  -> star-server target router
+  -> actors.<actor>.new.target
+  -> star-bbpd tool actor
+       -> documents.ingest.domain|host|url|relation
+       -> star-server persists finding
+       -> documents.new.<dtype> with _id and _rev
+            -> DNS resolver consumes documents.new.domain
+            -> documents.updated.domain
+            -> star-server updates the existing CouchDB document
+```
+
+New findings must never be published directly to `documents.new.*`; that route is for persisted-document events. BBPD derives all exchanges, actor target queues, and the DNS persisted-domain binding from `bbp.topology` and validated configuration.
+
+Document and relation publishes use persistent JSON messages with UTF-8 content encoding and AMQP `type` equal to the canonical document dtype.
 
 ## Running
 
@@ -149,6 +152,12 @@ python -m build
 python -m pip check
 ```
 
+Run the broker routing integration test against a disposable RabbitMQ instance:
+
+```bash
+BBPD_RABBITMQ_INTEGRATION=1 pytest -q tests/test_rabbitmq_routing_integration.py
+```
+
 Run the pinned upstream fixture suite:
 
 ```bash
@@ -170,13 +179,13 @@ nix build
 
 ## Migration loop
 
-- #2: strict StarIntel 0.9 boundary — current change
-- #3: verify durable ingest/update topology end to end
+- #2: strict StarIntel 0.9 boundary — merged
+- #3: durable ingest/update topology — current change
 - #4: publisher settlement and ACK/NACK correctness
 - #5: deterministic identity and recursive provenance
 - #6: tool lifecycle and parser correctness
 - #7: remaining configuration/topology/packaging hardening
-- #8: complete conformance and RabbitMQ integration CI
+- #8: complete integration CI
 
 ## License
 
