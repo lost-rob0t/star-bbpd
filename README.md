@@ -1,343 +1,162 @@
 # star-bbpd
 
-BBP Actor Service - A Python actor-based service using Pykka and pika for bug bounty reconnaissance tool orchestration.
+Python/Pykka external actor service for StarIntel reconnaissance tools.
 
-## Overview
+`star-bbpd` consumes actor-specific target messages from RabbitMQ, runs tools such as Subfinder, Nmap, Httpx, and Katana, and publishes derived StarIntel documents, relations, and actor events.
 
-The BBP Actor Service runs bug bounty and reconnaissance tools (subfinder, nmap, httpx, katana) outside of gserver in a separate Python process. It consumes StarIntel Target documents from RabbitMQ, executes the appropriate tool, and emits StarIntel documents and relations back to RabbitMQ for gserver ingestion.
+## Status
 
-**Key Features:**
-- Actor-based architecture using Pykka ThreadingActor
-- RabbitMQ integration with manual ack for reliability
-- Line-by-line output processing for memory safety
-- Automatic dataset and sources propagation
-- Event subsystem integration for monitoring
-- Graceful shutdown with in-flight scan completion
+The service is being migrated to the current StarIntel 0.9 and star-server contracts. The active migration backlog is tracked in issues #1 through #8.
 
-## Architecture
+This branch fixes the first transport/configuration layer:
 
-### Core Components
+- runtime `config.toml` is local-only and ignored by Git;
+- tracked defaults no longer contain an operational broker hostname or credentials;
+- new findings publish to `documents.ingest.<dtype>` for durable server ingestion;
+- DNS listens to persisted `documents.new.domain` events and publishes `documents.updated.domain` updates;
+- CI provides a stable `Quality gate` check.
 
-- **RabbitManager**: Connection and channel management with exponential backoff
-- **Publisher**: Publishes all documents, relations, and events to RabbitMQ
-- **TargetConsumer** (one per tool): Consumes targets from actor-specific queues
-- **ToolActor** (abstract base): Executes tool subprocess, parses output, emits docs/relations/events
-- **Tool-specific actors**: SubfinderActor, NmapActor, HttpxActor, KatanaActor
+The strict 0.9 document migration, publisher-confirmed ACK settlement, and tool-runner overhaul remain open work.
 
-### Message Flow
+## Requirements
 
-```
-RabbitMQ (actors.subfinder.new.target)
-  → TargetConsumer validates & forwards
-    → ToolActor executes subprocess
-      → Parses output line-by-line
-        → Publisher emits to documents exchange
-          → TargetConsumer acks after completion
-```
+- Python 3.10 or newer
+- RabbitMQ
+- Subfinder
+- Nmap
+- Httpx
+- Katana
 
-## Prerequisites
-
-### System Requirements
-
-- Python 3.9 or higher
-- RabbitMQ server (local or remote)
-- Nix (optional, but recommended for reproducible builds)
-
-### External Tools
-
-The following tools must be installed and available in PATH:
-
-- **subfinder**: Subdomain enumeration tool
-- **nmap**: Network scanner
-- **httpx**: HTTP toolkit
-- **katana**: Web crawler
-
-Install these tools separately or ensure they're available in your environment.
+Nix is optional but supported by the repository flake.
 
 ## Installation
 
-### Using Nix (Recommended)
+### Python
 
 ```bash
-# Enter development environment
-nix develop
-
-# Or build the package
-nix build
-
-# Or run directly
-nix run
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install --editable ".[dev]"
 ```
 
-### Using pip
+### Nix
 
 ```bash
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install -e .
+nix develop
 ```
 
 ## Configuration
 
-Configuration is managed via TOML files. See `config.toml` for the full configuration example.
+Never commit `config.toml`. Create it from the sanitized example:
 
-### Configuration Sections
-
-#### [service]
-```toml
-[service]
-name = "bbp-actors"
-log_level = "INFO"           # DEBUG, INFO, WARNING, ERROR
-json_pretty = false
+```bash
+cp config.example.toml config.toml
+$EDITOR config.toml
 ```
 
-#### [documents]
-RabbitMQ connection settings for the documents exchange:
+The example uses `localhost` and placeholder credentials. Replace them with a dedicated RabbitMQ account before running the service.
 
-```toml
-[documents]
-host = "localhost"
-port = 5672
-vhost = "/"
-username = "guest"
-password = "guest"
-exchange = "documents"
-exchange_type = "topic"
-heartbeat_sec = 30
-```
-
-#### [events]
-Events exchange configuration:
-
-```toml
-[events]
-exchange = "events"
-exchange_type = "topic"
-```
-
-#### [routing]
-Routing key templates:
+### Routing contract
 
 ```toml
 [routing]
 target_key = "actors.{actor}.new.target"
-doc_key = "document.new.{dtype}"
+document_ingest_key = "documents.ingest.{dtype}"
+document_update_key = "documents.updated.{dtype}"
+document_new_key = "documents.new.{dtype}"
 event_key = "event.{eventType}"
 ```
 
-#### [actors.*]
-Per-actor configuration:
+The routes have distinct meanings:
 
-```toml
-[actors.subfinder]
-enabled = true
-queue = "bbp.subfinder.targets"
-prefetch = 1                  # Number of messages to prefetch
-emit_relations = true
-```
+| Key | Purpose |
+| --- | --- |
+| `actors.<actor>.new.target` | Deliver a persisted target to an external actor |
+| `documents.ingest.<dtype>` | Persist a newly derived document or relation |
+| `documents.updated.<dtype>` | Persist an update to an existing document |
+| `documents.new.<dtype>` | Notify consumers after server persistence |
+| `event.<eventType>` | Deliver actor lifecycle and failure events |
 
-#### [tools.*]
-Tool-specific settings:
+Do not publish a new finding directly to `documents.new.*`; that route is event-only and does not perform durable insert by itself.
 
-```toml
-[tools.subfinder]
-bin = "subfinder"             # Path to binary (or name if in PATH)
-timeout_sec = 300             # Execution timeout in seconds
-args = ["-silent"]            # Additional command arguments
-```
-
-## Usage
-
-### Start the Service
+## Running
 
 ```bash
-# Using Nix
-nix run
-
-# Or directly with Python
-python bbp/main.py
-
-# Or with custom config
-python bbp/main.py /path/to/config.toml
+star-bbpd config.toml
 ```
 
-### Testing with RabbitMQ
+Or:
 
-1. Start RabbitMQ:
 ```bash
-docker run -d -p 5672:5672 -p 15672:15672 rabbitmq:3-management
+python -m bbp.main config.toml
 ```
 
-2. Create a test target (Python):
-```python
-from starintel_doc.targets import new_target
-import pika
+The default path is `config.toml` when no argument is supplied.
 
-# Create target
-target = new_target("test-dataset", "example.com", "subfinder")
-
-# Publish to RabbitMQ
-connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-channel = connection.channel()
-channel.basic_publish(
-    exchange='documents',
-    routing_key='actors.subfinder.new.target',
-    body=target.to_json()
-)
-print(f"Published target: {target.to_json()}")
-connection.close()
-```
-
-3. Monitor output on RabbitMQ management console:
-   - Navigate to http://localhost:15672 (guest/guest)
-   - Check exchanges: `documents` and `events`
-   - View queues: `bbp.subfinder.targets`
-
-### Graceful Shutdown
-
-Press `Ctrl+C` (SIGINT) or send SIGTERM to gracefully shutdown:
-
-1. Stops accepting new targets
-2. Waits for in-flight scans to complete
-3. Flushes pending publishes
-4. Closes RabbitMQ connections
-5. Shuts down actor system
-
-## Tool Actors
+## Actors
 
 ### Subfinder
-- **Consumes**: Domain targets
-- **Emits**: Domain documents
-- **Relations**: `target → domain` (predicate: `has-a`, note: `subdomain`)
-- **Command**: `subfinder -silent -d <domain>`
+
+- target: domain
+- output: domain documents and relations
+- command baseline: `subfinder -silent -d <domain>`
 
 ### Nmap
-- **Consumes**: Host/IP/CIDR targets
-- **Emits**: Host documents with service/port information
-- **Relations**: `target → host` (predicate: `related-to`, note: `host-discovery`)
-- **Command**: `nmap -sV <target>`
+
+- target: host, IP, or CIDR
+- output: host documents with service data and relations
+- command baseline: `nmap -sV <target>`
 
 ### Httpx
-- **Consumes**: Host/domain/URL targets
-- **Emits**: URL documents
-- **Relations**: `target → url` (predicate: `related-to`, note: `httpx`)
-- **Command**: `httpx -silent -json -u <target>`
+
+- target: host, domain, or URL
+- output: URL documents and relations
+- command baseline: `httpx -silent -json -u <target>`
 
 ### Katana
-- **Consumes**: URL targets
-- **Emits**: URL documents (discovered URLs)
-- **Relations**: `seed → discovered` (predicate: `links-to`, note: `crawl`)
-- **Command**: `katana -silent -json -u <url>`
 
-## Event Types
+- target: URL
+- output: discovered URL documents and relations
+- command baseline: `katana -silent -json -u <url>`
 
-The service emits events to the `events` exchange with routing key `event.{eventType}`:
+### DNS resolver
 
-- **service-start**: Service starting up
-- **service-ready**: Service ready to accept targets
-- **service-shutdown**: Service shutting down
-- **scan-start**: Tool scan starting
-- **scan-finished**: Tool scan completed successfully
-- **scan-error**: Tool scan failed or timed out
-- **publish-error**: Failed to publish document/relation
-- **parse-error**: Failed to parse target JSON
+The DNS resolver consumes persisted domain events, resolves A and AAAA records, and submits updates through the server update route.
 
-## Development
+## Development checks
 
-### Project Structure
-
-```
-bbp/
-├── __init__.py
-├── main.py                  # Orchestration + signal handling
-├── config.py                # TOML loading + validation
-├── rabbit.py                # RabbitManager (connection + channels)
-├── publisher.py             # Publisher actor (docs/relations/events)
-├── consumer.py              # TargetConsumer actor (RabbitMQ consumption)
-├── tool_actor.py            # Abstract ToolActor base class
-├── events.py                # Event creation helpers
-├── util.py                  # Dataset/sources propagation
-└── tools/
-    ├── __init__.py          # TOOL_CLASSES export
-    ├── subfinder.py         # SubfinderActor
-    ├── nmap.py              # NmapActor
-    ├── httpx.py             # HttpxActor
-    └── katana.py            # KatanaActor
-```
-
-### Development Environment
+Run the same core checks used by CI:
 
 ```bash
-# Enter development environment
-nix develop
-
-# Format code
-black .
-
-# Type checking
-mypy bbp/
-
-# Linting
-flake8 bbp/
+python -m compileall -q bbp tests
+ruff check bbp tests
+pytest --cov=bbp --cov-report=term-missing
+python -m build
+python -m pip check
 ```
 
-## Flake Outputs
+## CI gate
 
-This project provides the following Nix flake outputs:
+`.github/workflows/ci.yml` runs on pull requests and pushes to `master`.
 
-### Packages
-- `packages.default` - The star-bbpd package (default)
-- `packages.star-bbpd` - The star-bbpd package explicitly
+It contains:
 
-### Development Shells
-- `devShells.default` - Development environment with:
-  - Python 3
-  - pika (RabbitMQ client library)
-  - pykka (Actor framework)
-  - ulid (ULID generation)
-  - tomli (TOML parsing)
-  - pytest (testing framework)
-  - black (code formatter)
-  - flake8 (linter)
-  - mypy (type checker)
+- **Config safety** — rejects a tracked `config.toml`, missing ignore rule/example, or the retired production broker hostname.
+- **Python 3.10 and 3.13** — installs the pinned runtime, compiles, lints, tests, builds, and verifies dependencies.
+- **Quality gate** — one stable terminal job intended for branch protection.
 
-### Apps
-- `apps.default` - Runs the star-bbpd application
+Configure the repository ruleset to require the `Quality gate` status before merging to `master`.
 
-## Troubleshooting
+## Known blockers
 
-### RabbitMQ Connection Failed
-
-- Check RabbitMQ is running: `docker ps` or `systemctl status rabbitmq-server`
-- Verify connection settings in config.toml
-- Check network connectivity to RabbitMQ host
-
-### Tool Not Found
-
-- Ensure tool binaries (subfinder, nmap, httpx, katana) are in PATH
-- Or provide absolute path in `[tools.*]` section: `bin = "/usr/local/bin/subfinder"`
-
-### Parse Errors
-
-- Check target JSON format matches StarIntel Target schema
-- Verify `dtype == "target"` and `actor` field matches expected actor name
-- Enable DEBUG logging to see detailed parse errors
-
-### Memory Issues
-
-- The service processes tool output line-by-line for memory safety
-- Adjust `prefetch` values in actor configs to limit concurrent scans
-- Monitor system resources during large scans
+- Strict StarIntel 0.9 boundary migration: #2
+- Publisher confirms and correct ACK/NACK settlement: #4
+- Deterministic relation identity and recursive provenance: #5
+- Timeout-safe runner and parser finalization: #6
+- Nix/configuration hardening: #7
+- RabbitMQ and star-server integration tests: #8
 
 ## License
 
 MIT
-
-## References
-
-- Specification: `BBP_ACTOR_SERVICE.org`
-- StarIntel Document Library: `starintel-doc` flake input
-- StarIntel Server: `../starintel-server`
