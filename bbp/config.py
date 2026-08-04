@@ -62,8 +62,31 @@ class Config:
                     f"[routing].{field} must contain the {placeholder} placeholder"
                 )
 
-        self._require_positive_int("service.publisher_pool_size", self.service.get("publisher_pool_size", 3))
-        self._require_positive_int("service.tool_pool_size", self.service.get("tool_pool_size", 2))
+        self._require_positive_int(
+            "service.publisher_pool_size", self.service.get("publisher_pool_size", 3)
+        )
+        self._require_positive_int(
+            "service.tool_pool_size", self.service.get("tool_pool_size", 2)
+        )
+        self._require_positive_int(
+            "service.publisher_max_retries",
+            self.service.get("publisher_max_retries", 3),
+        )
+        self._require_positive_number(
+            "service.publish_settlement_timeout_sec",
+            self.service.get("publish_settlement_timeout_sec", 30),
+        )
+        self._require_positive_number(
+            "service.shutdown_timeout_sec",
+            self.service.get("shutdown_timeout_sec", 60),
+        )
+        delays = self.service.get("publisher_retry_delays_sec", [1, 2, 4])
+        if not isinstance(delays, list) or not delays:
+            raise ValueError("service.publisher_retry_delays_sec must be a non-empty list")
+        for index, delay in enumerate(delays):
+            self._require_nonnegative_number(
+                f"service.publisher_retry_delays_sec[{index}]", delay
+            )
 
         enabled = self.enabled_actors()
         if not enabled:
@@ -78,15 +101,55 @@ class Config:
                 raise ValueError(
                     f"Actor '{actor}' is enabled but missing [tools.{actor}] section"
                 )
+            tool_config = self.get_tool_config(actor)
             self._require_positive_int(
                 f"tools.{actor}.timeout_sec",
-                self.get_tool_config(actor).get("timeout_sec", 300),
+                tool_config.get("timeout_sec", 300),
+            )
+            self._require_positive_number(
+                f"tools.{actor}.publish_timeout_sec",
+                tool_config.get("publish_timeout_sec", 30),
+            )
+
+        dns = self.data.get("dns_resolver", {})
+        if dns.get("enabled", False):
+            self._require_positive_int(
+                "dns_resolver.prefetch", dns.get("prefetch", 5)
+            )
+            self._require_positive_number(
+                "dns_resolver.timeout_sec", dns.get("timeout_sec", 5)
+            )
+            self._require_positive_number(
+                "dns_resolver.publish_timeout_sec",
+                dns.get("publish_timeout_sec", 30),
+            )
+            self._require_positive_number(
+                "dns_resolver.shutdown_timeout_sec",
+                dns.get("shutdown_timeout_sec", 60),
             )
 
     @staticmethod
     def _require_positive_int(name: str, value: Any) -> None:
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
+
+    @staticmethod
+    def _require_positive_number(name: str, value: Any) -> None:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value <= 0
+        ):
+            raise ValueError(f"{name} must be a positive number")
+
+    @staticmethod
+    def _require_nonnegative_number(name: str, value: Any) -> None:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value < 0
+        ):
+            raise ValueError(f"{name} must be a non-negative number")
 
     @property
     def service(self) -> Dict[str, Any]:

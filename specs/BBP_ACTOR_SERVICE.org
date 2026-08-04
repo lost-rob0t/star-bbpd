@@ -6,104 +6,13 @@
 
 * 1. Authority
 
-Current source and tests are authoritative. This service follows:
+Current source and tests are authoritative. The document contract is StarIntel 0.9 and current =starintel-server= source defines durable routing and at-least-once delivery.
 
-- =starintel-doc@980f7a217a0d28f22508c2f05831ceb2fefe8bd0=
-- canonical schema =lost-rob0t/starintel-gpt-auto-dig@ff814ff63868286d68e21502122832802cd5e361=
-- schema version =0.9.0=
-- schema revision =0.9.0+fields.20260726.2=
-- current =starintel-server= durable ingest and update routes
+RabbitMQ connections and channels are owned by exactly one consumer or publisher thread. Cross-thread broker operations are scheduled with =add_callback_threadsafe= or sent as actor messages.
 
-The actor model remains Pykka. RabbitMQ connections and channels remain owned by their worker or consumer thread.
+* 2. Document and routing contracts
 
-* 2. Document boundary
-
-=bbp.document_boundary= is the only production boundary for StarIntel document parsing, field access, construction, serialization, and validation.
-
-Production modules must not import migration-only flat modules such as:
-
-- =starintel_doc.targets=
-- =starintel_doc.hosts=
-- =starintel_doc.relations=
-
-The service has no implicit 0.8 adapter. Flat documents are rejected rather than rewritten.
-
-** 2.1 Canonical envelope
-
-Every produced document contains:
-
-- =_id=
-- =dataset=
-- canonical =dtype=
-- =schema_version: "0.9.0"=
-- integer =version=
-- RFC 3339 =date_added= and =date_updated=
-- structured =sources=
-- =evidence=
-- canonical =data=
-- preserved =extensions=
-
-Unknown top-level and dtype-data fields are rejected according to the pinned schema.
-
-** 2.2 Validation errors
-
-The boundary exposes categorized failures. Required categories include:
-
-- =invalid_json=
-- =invalid_encoding=
-- =unsupported_spec_version=
-- =invalid_enum= for aliases
-- =unknown_object_type=
-- =missing_required_field=
-- =wrong_type=
-- =invalid_datetime=
-- =undeclared_field=
-- =schema_revision_mismatch=
-- =unexpected_dtype=
-
-Target consumers report the category without logging an entire payload.
-
-** 2.3 Target access
-
-A target is validated before dispatch. Actor code accesses =id=, =dataset=, =actor=, =target=, =delay=, =recurring=, =options=, =sources=, and =extensions= through the boundary wrapper rather than raw =data= layout.
-
-BBPD additionally requires a non-empty =data.actor= even though the shared schema requires only =data.target=.
-
-** 2.4 Builders
-
-The boundary constructs canonical target, domain, host, URL, and relation documents.
-
-Nmap service observations are embedded objects under =host.data.ports=:
-
-#+begin_src json
-{"port": 443, "name": "https", "version": "nginx 1.25"}
-#+end_src
-
-A service observation is not a standalone dtype.
-
-Derived source provenance appends:
-
-#+begin_src json
-{"kind": "tool", "name": "subfinder"}
-#+end_src
-
-Existing structured sources and unrelated extension namespaces are preserved.
-
-** 2.5 Compatibility and identity
-
-This migration changes the envelope, not retry identity policy:
-
-- domain ID: legacy deterministic hash of domain and record type
-- host ID: legacy deterministic hash of IP
-- URL ID: legacy deterministic hash of URL and content
-- target ID: legacy deterministic hash of dataset, target, and actor
-- relation ID: ULID until issue #5 replaces it with the approved deterministic relation identity
-
-These hashes are deduplication keys, not integrity proofs.
-
-* 3. RabbitMQ contract
-
-The documents exchange is a durable topic exchange.
+=bbp.document_boundary= owns parsing, canonical field access, construction, serialization, and validation.
 
 | Operation | Routing key |
 |-----------+-------------|
@@ -113,63 +22,108 @@ The documents exchange is a durable topic exchange.
 | update ingest | =documents.updated.<dtype>= |
 | actor event | =event.<eventType>= |
 
-A new finding must not be sent directly to =documents.new.*=.
+All required document and relation messages are persistent UTF-8 JSON with AMQP =type= equal to canonical =dtype=.
 
-The strict boundary does not alter publisher settlement or acknowledgement behavior. Issue #4 owns confirmed publication and ACK/NACK semantics.
+* 3. Publisher settlement
 
-* 4. Tool behavior
+** 3.1 Worker ownership
 
-** 4.1 Subfinder
+Each =PublisherWorker= owns one private =BlockingConnection= and one private channel. The channel enables =confirm_delivery()= before publishing.
 
-- input: strict target
-- output: domain documents
-- relation: root domain to discovered domain
+Every publish uses =mandatory=True=.
 
-** 4.2 Nmap
+** 3.2 Settlement result
 
-- input: strict target
-- output: host documents with embedded port/service observations
-- relation: target to host
+=PublishResult= contains:
 
-Parser finalization remains issue #6.
+- success/failure;
+- routing key;
+- number of attempts;
+- failure category (=transient= or =permanent=);
+- bounded error text.
 
-** 4.3 Httpx
+Required documents and relations use synchronous Pykka =ask()=. Tool actors never access publisher connections or channels.
 
-- input: strict target
-- output: URL documents
-- relation: target to URL
+** 3.3 Failure classification
 
-** 4.4 Katana
+Permanent:
 
-- input: strict target
-- output: discovered URL documents
-- relation: target to discovered URL
+- serialization failure;
+- invalid publisher message;
+- RabbitMQ mandatory return / unroutable routing key.
 
-** 4.5 DNS resolver
+Transient:
 
-- input: strict persisted domain from =documents.new.domain=
-- output: validated domain update through =documents.updated.domain=
-- update preserves =_id=, =_rev=, sources, evidence, extensions, and unrelated data
+- broker NACK;
+- AMQP connection/channel failure;
+- publisher actor settlement timeout;
+- tool timeout or non-zero exit under the current retry policy;
+- unexpected scan processing failure.
 
-* 5. Packaging and conformance
+Publisher workers retry transient broker failures with configured bounded backoff. They do not retry unroutable messages.
 
-Python requires 3.10 or newer. The Python dependency and Nix derivation use the same pinned =starintel-doc= revision.
+** 3.4 Events
 
-The schema is supplied through =STARINTEL_CONFORMANCE_ROOT= or =STARINTEL_SCHEMA=. Startup rejects a package/spec/schema revision mismatch.
+Scan-start, scan-finished, scan-error, and publish-error events are explicitly best-effort. Required output settlement never depends on event delivery.
 
-Required checks:
+* 4. Target delivery settlement
 
-- repository unit tests
-- upstream Python conformance fixture suite
-- package build and dependency check
-- =nix flake check=
-- =nix build=
+Each scan receives a unique =run_id=. Every required output carries that run ID to the publisher message.
 
-* 6. Deferred work
+A target is ACKed only after:
 
-- issue #3: end-to-end durable ingest/update verification
-- issue #4: publisher confirms and ACK/NACK settlement
-- issue #5: deterministic identities and recursive provenance
-- issue #6: timeout-safe runner and parser lifecycle
-- issue #7: remaining configuration/topology/packaging hardening
-- issue #8: complete integration CI
+1. the tool process reaches the configured terminal state;
+2. every required document publish is broker-confirmed;
+3. every required relation publish is broker-confirmed;
+4. the terminal event is emitted under the documented best-effort policy.
+
+Delivery decisions:
+
+| Condition | Decision |
+|-----------+----------|
+| successful complete settlement | ACK |
+| invalid input/schema/actor | emit parse event, ACK |
+| transient first failure | NACK, requeue |
+| transient redelivery failure | NACK, do not requeue |
+| permanent/unroutable required output | NACK, do not requeue |
+
+The =redelivered= flag implements a maximum of two deliveries without changing existing queue arguments. Issue #5 makes retry outputs deterministic.
+
+* 5. DNS settlement
+
+The DNS resolver validates =documents.new.domain=, resolves the document, publishes =documents.updated.domain= through the same required settlement path, and ACKs only after confirmation.
+
+Invalid domain input is ACKed after a categorized parse event. Transient update failure follows the same one-requeue policy as tool targets.
+
+* 6. Shutdown
+
+Shutdown is mailbox-driven and has no fixed sleeps.
+
+1. target consumers receive =StopIntake= and stop RabbitMQ intake while remaining alive;
+2. DNS settlement completes and its actor stops;
+3. tool pools drain current and queued scans;
+4. consumer actors drain ACK/NACK messages and stop;
+5. publisher workers drain queued events and stop;
+6. RabbitMQ connections close.
+
+Every blocking stop is bounded by =shutdown_timeout_sec=.
+
+* 7. Configuration
+
+Required settlement controls:
+
+- =publisher_max_retries=
+- =publisher_retry_delays_sec=
+- =publish_settlement_timeout_sec=
+- =shutdown_timeout_sec=
+- per-tool =publish_timeout_sec=
+- DNS =publish_timeout_sec=
+
+Configuration rejects non-positive retry counts/timeouts and negative retry delays.
+
+* 8. Deferred work
+
+- issue #5: deterministic identities, relation deduplication, recursive provenance
+- issue #6: timeout-safe concurrent stdout/stderr runner and parser finalization
+- issue #7: remaining secret/TLS/configuration hardening
+- issue #8: complete star-server/CouchDB integration CI

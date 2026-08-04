@@ -2,6 +2,8 @@
 
 """BBP Actor Service entry point."""
 
+from __future__ import annotations
+
 import logging
 import signal
 import sys
@@ -11,7 +13,7 @@ from typing import Any, Dict, List, Optional
 import pykka
 
 from bbp.config import Config
-from bbp.consumer import TargetConsumer
+from bbp.consumer import StopIntake, TargetConsumer
 from bbp.dns_resolver import DnsResolverActor
 from bbp.events import create_event
 from bbp.publisher_pool import PublishEvent, PublisherPool, PublisherPoolProxy
@@ -98,13 +100,18 @@ def main() -> None:
 
         consumer_refs: List[Any] = []
         for actor_name in config.enabled_actors():
+            actor_config = dict(config.get_actor_config(actor_name))
+            actor_config.setdefault(
+                "shutdown_timeout_sec",
+                config.service.get("shutdown_timeout_sec", 60),
+            )
             consumer_refs.append(
                 TargetConsumer.start(
                     actor_name,
                     config.documents,
                     publisher,
                     tool_pools[actor_name].get_proxy(),
-                    config.get_actor_config(actor_name),
+                    actor_config,
                     config.routing,
                 )
             )
@@ -127,6 +134,7 @@ def main() -> None:
                 config.routing,
                 publisher,
                 dns_resolver_ref,
+                float(config.service.get("shutdown_timeout_sec", 60)),
             )
 
         signal.signal(signal.SIGINT, signal_handler)
@@ -142,6 +150,14 @@ def main() -> None:
         raise SystemExit(1) from exc
 
 
+def _stop_actor(actor_ref: Any, timeout: float, name: str) -> None:
+    try:
+        actor_ref.stop(block=True, timeout=timeout)
+    except Exception as exc:
+        log.error("Failed to stop %s cleanly: %s", name, exc)
+        raise
+
+
 def shutdown(
     consumer_refs: List[Any],
     tool_pools: Dict[str, Any],
@@ -150,27 +166,36 @@ def shutdown(
     routing_config: Dict[str, Any],
     publisher: PublisherPoolProxy,
     dns_resolver_ref: Optional[Any] = None,
+    shutdown_timeout: float = 60,
 ) -> None:
     emit_service_event(
         publisher,
         "service-shutdown",
-        "BBP Actor Service shutting down",
+        "BBP Actor Service shutting down after in-flight settlement",
         routing_config,
     )
 
+    # Stop new target intake while keeping consumer actors alive to receive
+    # settlement ACK/NACK messages from in-flight tool actors.
+    for index, consumer_ref in enumerate(consumer_refs):
+        consumer_ref.ask(StopIntake(), block=True, timeout=shutdown_timeout)
+        log.info("Stopped intake for consumer-%s", index)
+
     if dns_resolver_ref:
-        dns_resolver_ref.stop()
-    for consumer_ref in consumer_refs:
-        consumer_ref.stop()
+        _stop_actor(dns_resolver_ref, shutdown_timeout, "dns-resolver")
 
-    time.sleep(2)
-    for pool in tool_pools.values():
-        pool.stop()
+    for name, pool in tool_pools.items():
+        pool.stop(shutdown_timeout)
+        log.info("Stopped tool pool %s after settlement", name)
 
-    time.sleep(2)
-    publisher_pool.stop()
+    # ACK/NACK messages are now queued before each stop message, so consumer
+    # actors drain those settlement decisions before exiting.
+    for index, consumer_ref in enumerate(consumer_refs):
+        _stop_actor(consumer_ref, shutdown_timeout, f"consumer-{index}")
+
+    publisher_pool.stop(shutdown_timeout)
     rabbit_manager.close()
-    pykka.ActorRegistry.stop_all()
+    pykka.ActorRegistry.stop_all(block=True, timeout=shutdown_timeout)
     raise SystemExit(0)
 
 
