@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
+import itertools
 import json
 import logging
-import time
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-import itertools
-import hashlib
 
 import pika
 import pykka
+from pika.exceptions import AMQPError, NackError, UnroutableError
 
 from bbp.rabbit import RabbitManager
+from bbp.settlement import FailureKind, PublishResult
 
 log = logging.getLogger(__name__)
 
@@ -21,7 +24,6 @@ JSON_CONTENT_ENCODING = "utf-8"
 
 
 def document_properties(dtype: str) -> pika.BasicProperties:
-    """Build persistent JSON properties using the canonical document dtype."""
     if not isinstance(dtype, str) or not dtype:
         raise ValueError("document dtype must be a non-empty string")
     return pika.BasicProperties(
@@ -33,7 +35,6 @@ def document_properties(dtype: str) -> pika.BasicProperties:
 
 
 def event_properties() -> pika.BasicProperties:
-    """Build persistent UTF-8 JSON properties for actor events."""
     return pika.BasicProperties(
         content_type=JSON_CONTENT_TYPE,
         content_encoding=JSON_CONTENT_ENCODING,
@@ -41,54 +42,68 @@ def event_properties() -> pika.BasicProperties:
     )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class PublishDocument:
-    """Message to publish a document"""
-    doc: Any  # StarIntel Document object
+    doc: Any
     routing_key: str
+    run_id: str = ""
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class PublishRelation:
-    """Message to publish a relation"""
-    rel: Any  # StarIntel Relation object
+    rel: Any
     routing_key: str
+    run_id: str = ""
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class PublishEvent:
-    """Message to publish an event"""
     event: Dict[str, Any]
     routing_key: str
+    run_id: str = ""
+
+
+PublishMessage = PublishDocument | PublishRelation | PublishEvent
+
+
+class PublishAttemptError(RuntimeError):
+    def __init__(
+        self,
+        failure_kind: FailureKind,
+        attempts: int,
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
+        self.attempts = attempts
 
 
 class PublisherWorker(pykka.ThreadingActor):
-    """
-    Single publisher worker actor.
-    
-    Handles publishing for a subset of documents/relations/events to distribute load.
-    """
+    """Publisher actor that owns one confirm-enabled pika channel."""
 
-    def __init__(self, rabbit_manager: RabbitManager, config: Dict[str, Any], worker_id: int):
+    def __init__(
+        self, rabbit_manager: RabbitManager, config: Dict[str, Any], worker_id: int
+    ):
         super().__init__()
         self.rabbit_manager = rabbit_manager
         self.config = config
         self.worker_id = worker_id
-        self.documents_exchange = config.get("documents", {}).get("exchange", "documents")
+        self.documents_exchange = config.get("documents", {}).get(
+            "exchange", "documents"
+        )
         self.events_exchange = config.get("events", {}).get("exchange", "events")
-        self.max_retries = 3
-        self.retry_delays = [1, 2, 4]  # exponential backoff in seconds
-        # pika connections/channels are NOT thread-safe; each worker owns its own connection
+        service = config.get("service", {})
+        self.max_retries = int(service.get("publisher_max_retries", 3))
+        configured_delays = service.get("publisher_retry_delays_sec", [1, 2, 4])
+        self.retry_delays = [float(value) for value in configured_delays]
         self._connection: Optional[pika.BlockingConnection] = None
         self._channel: Optional[pika.channel.Channel] = None
         self._conn_lock = threading.Lock()
 
     def on_stop(self) -> None:
-        """Close our per-worker connection cleanly."""
         self._reset_connection()
 
     def _reset_connection(self) -> None:
-        """Force a reconnect on next publish attempt."""
         with self._conn_lock:
             try:
                 if self._channel and getattr(self._channel, "is_open", False):
@@ -109,9 +124,10 @@ class PublisherWorker(pykka.ThreadingActor):
                 self._connection = None
 
     def _ensure_channel(self) -> pika.channel.Channel:
-        """Ensure this worker has an open connection+channel (owned by this thread)."""
         with self._conn_lock:
-            if self._connection is None or not getattr(self._connection, "is_open", False):
+            if self._connection is None or not getattr(
+                self._connection, "is_open", False
+            ):
                 self._connection = self.rabbit_manager.new_connection(
                     connection_name=f"bbp.publisher.{self.worker_id}"
                 )
@@ -119,210 +135,275 @@ class PublisherWorker(pykka.ThreadingActor):
 
             if self._channel is None or not getattr(self._channel, "is_open", False):
                 self._channel = self._connection.channel()
+                self._channel.confirm_delivery()
 
             return self._channel
 
-    def on_receive(self, message):
-        """Handle incoming messages"""
+    def on_receive(self, message: object) -> PublishResult:
         if isinstance(message, PublishDocument):
-            self._publish_document(message.doc, message.routing_key)
-        elif isinstance(message, PublishRelation):
-            self._publish_relation(message.rel, message.routing_key)
-        elif isinstance(message, PublishEvent):
-            self._publish_event(message.event, message.routing_key)
-        else:
-            log.warning(f"[Publisher-{self.worker_id}] Unknown message type: {type(message)}")
+            return self._publish_document(message)
+        if isinstance(message, PublishRelation):
+            return self._publish_relation(message)
+        if isinstance(message, PublishEvent):
+            return self._publish_event(message)
+        return PublishResult.failure(
+            routing_key="",
+            attempts=0,
+            failure_kind=FailureKind.PERMANENT,
+            error=f"unknown publisher message: {type(message)!r}",
+        )
 
-        return None
-
-    def _publish_document(self, doc: Any, routing_key: str):
-        """Publish a StarIntel document to documents exchange."""
+    def _publish_document(self, message: PublishDocument) -> PublishResult:
         try:
-            body = doc.to_json()
-            self._publish_with_retry(
-                exchange=self.documents_exchange,
+            body = message.doc.to_json()
+            properties = document_properties(message.doc.dtype)
+        except Exception as exc:
+            return self._serialization_failure(message.routing_key, exc)
+        return self._settle(
+            exchange=self.documents_exchange,
+            routing_key=message.routing_key,
+            body=body,
+            properties=properties,
+            source_id=getattr(message.doc, "id", ""),
+            run_id=message.run_id,
+            emit_error=True,
+        )
+
+    def _publish_relation(self, message: PublishRelation) -> PublishResult:
+        try:
+            body = message.rel.to_json()
+            properties = document_properties(message.rel.dtype)
+        except Exception as exc:
+            return self._serialization_failure(message.routing_key, exc)
+        return self._settle(
+            exchange=self.documents_exchange,
+            routing_key=message.routing_key,
+            body=body,
+            properties=properties,
+            source_id=getattr(message.rel, "source", ""),
+            run_id=message.run_id,
+            emit_error=True,
+        )
+
+    def _publish_event(self, message: PublishEvent) -> PublishResult:
+        try:
+            body = json.dumps(message.event, separators=(",", ":"))
+        except Exception as exc:
+            return self._serialization_failure(message.routing_key, exc)
+        return self._settle(
+            exchange=self.events_exchange,
+            routing_key=message.routing_key,
+            body=body,
+            properties=event_properties(),
+            source_id=str(message.event.get("sourceId", "")),
+            run_id=message.run_id,
+            emit_error=message.event.get("eventType") != "publish-error",
+        )
+
+    def _serialization_failure(
+        self, routing_key: str, exc: Exception
+    ) -> PublishResult:
+        return PublishResult.failure(
+            routing_key=routing_key,
+            attempts=0,
+            failure_kind=FailureKind.PERMANENT,
+            error=f"serialization failed: {exc}",
+        )
+
+    def _settle(
+        self,
+        *,
+        exchange: str,
+        routing_key: str,
+        body: str,
+        properties: pika.BasicProperties,
+        source_id: str,
+        run_id: str,
+        emit_error: bool,
+    ) -> PublishResult:
+        try:
+            attempts = self._publish_with_retry(
+                exchange=exchange,
                 routing_key=routing_key,
                 body=body,
-                properties=document_properties(doc.dtype),
+                properties=properties,
             )
-            log.debug(
-                f"[Publisher-{self.worker_id}] Published document: {doc.dtype} ({doc.id if hasattr(doc, 'id') else 'unknown'}) -> {routing_key}"
-            )
-
-        except Exception as e:
-            log.error(f"[Publisher-{self.worker_id}] Failed to publish document: {e}", exc_info=True)
-            self._emit_publish_error(f"Failed to publish {doc.dtype}: {str(e)}", doc.id if hasattr(doc, "id") else "")
-
-    def _publish_relation(self, rel: Any, routing_key: str):
-        """Publish a StarIntel relation to documents exchange."""
-        try:
-            body = rel.to_json()
-            self._publish_with_retry(
-                exchange=self.documents_exchange,
+            return PublishResult.success(routing_key, attempts)
+        except PublishAttemptError as exc:
+            result = PublishResult.failure(
                 routing_key=routing_key,
-                body=body,
-                properties=document_properties(rel.dtype),
+                attempts=exc.attempts,
+                failure_kind=exc.failure_kind,
+                error=str(exc),
             )
-            log.debug(
-                f"[Publisher-{self.worker_id}] Published relation: {rel.predicate} ({rel.source} -> {rel.target}) -> {routing_key}"
-            )
+            if emit_error:
+                self._emit_publish_error(result, source_id, run_id)
+            return result
 
-        except Exception as e:
-            log.error(f"[Publisher-{self.worker_id}] Failed to publish relation: {e}", exc_info=True)
-            self._emit_publish_error(f"Failed to publish relation: {str(e)}", rel.source if hasattr(rel, "source") else "")
+    def _publish_with_retry(
+        self,
+        *,
+        exchange: str,
+        routing_key: str,
+        body: str | bytes,
+        properties: pika.BasicProperties,
+    ) -> int:
+        last_error: Exception | None = None
+        encoded = body.encode(JSON_CONTENT_ENCODING) if isinstance(body, str) else body
 
-    def _publish_event(self, event: Dict[str, Any], routing_key: str):
-        """Publish an event to events exchange."""
-        self._publish_event_direct(event, routing_key)
-
-    def _publish_event_direct(self, event: Dict[str, Any], routing_key: str = None):
-        """Publish event directly (for internal use, including error events)."""
-        try:
-            if routing_key is None:
-                routing_key = f"event.{event['eventType']}"
-            
-            body = json.dumps(event)
-            self._publish_with_retry(
-                exchange=self.events_exchange,
-                routing_key=routing_key,
-                body=body,
-                properties=event_properties(),
-            )
-            log.debug(
-                f"[Publisher-{self.worker_id}] Published event: {event['eventType']} ({event['actorName']}) -> {routing_key}"
-            )
-
-        except Exception as e:
-            log.error(f"[Publisher-{self.worker_id}] Failed to publish event: {e}", exc_info=True)
-
-    def _publish_with_retry(self, exchange: str, routing_key: str, body: str, properties: pika.BasicProperties):
-        """Publish to RabbitMQ with retry logic."""
-        last_error = None
-
-        for attempt in range(self.max_retries):
+        for attempt in range(1, self.max_retries + 1):
             try:
-                channel = self._ensure_channel()
-                channel.basic_publish(
+                confirmed = self._ensure_channel().basic_publish(
                     exchange=exchange,
                     routing_key=routing_key,
-                    body=body.encode("utf-8") if isinstance(body, str) else body,
+                    body=encoded,
                     properties=properties,
+                    mandatory=True,
                 )
-                return  # success
-
-            except Exception as e:
-                last_error = e
-                if attempt < self.max_retries - 1:
-                    delay = self.retry_delays[attempt]
-                    log.warning(
-                        f"[Publisher-{self.worker_id}] Publish failed (attempt {attempt + 1}/{self.max_retries}): {e}. Retrying in {delay}s..."
+                if confirmed is False:
+                    last_error = RuntimeError(
+                        "broker negatively acknowledged publish"
                     )
-                    self._reset_connection()
-                    time.sleep(delay)
                 else:
-                    log.error(
-                        f"[Publisher-{self.worker_id}] Publish failed after {self.max_retries} attempts: {e}"
-                    )
+                    return attempt
+            except UnroutableError as exc:
+                raise PublishAttemptError(
+                    FailureKind.PERMANENT,
+                    attempt,
+                    f"unroutable publish to {exchange}:{routing_key}",
+                ) from exc
+            except NackError as exc:
+                last_error = exc
+            except (AMQPError, OSError) as exc:
+                last_error = exc
 
-        raise last_error
+            if attempt < self.max_retries:
+                delay = self.retry_delays[min(attempt - 1, len(self.retry_delays) - 1)]
+                log.warning(
+                    "[Publisher-%s] transient publish failure %s/%s for %s: %s",
+                    self.worker_id,
+                    attempt,
+                    self.max_retries,
+                    routing_key,
+                    last_error,
+                )
+                self._reset_connection()
+                time.sleep(delay)
 
-    def _emit_publish_error(self, details: str, source_id: str):
-        """Emit publish-error event (best effort)."""
+        raise PublishAttemptError(
+            FailureKind.TRANSIENT,
+            self.max_retries,
+            f"publish failed after {self.max_retries} attempts: {last_error}",
+        )
+
+    def _emit_publish_error(
+        self, result: PublishResult, source_id: str, run_id: str
+    ) -> None:
         from bbp.events import create_event
-        
-        error_event = create_event(
+
+        event = create_event(
             actor_name=f"publisher-{self.worker_id}",
             event_type="publish-error",
-            details=details,
+            details=(
+                f"run_id={run_id}; kind={result.failure_kind}; "
+                f"routing_key={result.routing_key}; error={result.error}"
+            ),
             source_id=source_id,
         )
         try:
-            self._publish_event_direct(error_event)
+            self._settle(
+                exchange=self.events_exchange,
+                routing_key="event.publish-error",
+                body=json.dumps(event, separators=(",", ":")),
+                properties=event_properties(),
+                source_id=source_id,
+                run_id=run_id,
+                emit_error=False,
+            )
         except Exception:
-            pass  # best effort
+            pass
 
 
 class PublisherPool:
-    """
-    Publisher pool that distributes publishing load across multiple worker actors.
-    
-    Uses round-robin distribution for load balancing.
-    """
-
-    def __init__(self, rabbit_manager: RabbitManager, config: Dict[str, Any], pool_size: int = 3):
+    def __init__(
+        self, rabbit_manager: RabbitManager, config: Dict[str, Any], pool_size: int = 3
+    ):
+        if pool_size <= 0:
+            raise ValueError("publisher pool size must be positive")
         self.rabbit_manager = rabbit_manager
         self.config = config
         self.pool_size = pool_size
         self.workers: List[pykka.ActorRef] = []
         self.round_robin = itertools.cycle(range(pool_size))
         self._lock = threading.Lock()
+        self.settlement_timeout = float(
+            config.get("service", {}).get("publish_settlement_timeout_sec", 30)
+        )
+        self.shutdown_timeout = float(
+            config.get("service", {}).get("shutdown_timeout_sec", 60)
+        )
 
-        # Start worker actors
-        for i in range(pool_size):
-            worker = PublisherWorker.start(rabbit_manager, config, i)
-            self.workers.append(worker)
-            log.info(f"Started publisher worker {i}")
+        for worker_id in range(pool_size):
+            self.workers.append(
+                PublisherWorker.start(rabbit_manager, config, worker_id)
+            )
 
     def _get_next_worker(self) -> pykka.ActorRef:
-        """Get next worker using round-robin."""
         with self._lock:
-            worker_index = next(self.round_robin)
-            return self.workers[worker_index]
+            return self.workers[next(self.round_robin)]
 
-    def publish_document(self, doc: Any, routing_key: str):
-        """Publish document using next available worker."""
-        worker = self._get_next_worker()
-        worker.tell(PublishDocument(doc, routing_key))
+    def tell(self, message: PublishMessage) -> None:
+        self._get_next_worker().tell(message)
 
-    def publish_relation(self, rel: Any, routing_key: str):
-        """Publish relation using next available worker."""
-        worker = self._get_next_worker()
-        worker.tell(PublishRelation(rel, routing_key))
+    def publish_required(
+        self, message: PublishMessage, timeout: float | None = None
+    ) -> PublishResult:
+        routing_key = message.routing_key
+        try:
+            result = self._get_next_worker().ask(
+                message,
+                block=True,
+                timeout=self.settlement_timeout if timeout is None else timeout,
+            )
+        except Exception as exc:
+            return PublishResult.failure(
+                routing_key=routing_key,
+                attempts=0,
+                failure_kind=FailureKind.TRANSIENT,
+                error=f"publisher actor settlement failed: {exc}",
+            )
+        if not isinstance(result, PublishResult):
+            return PublishResult.failure(
+                routing_key=routing_key,
+                attempts=0,
+                failure_kind=FailureKind.PERMANENT,
+                error=f"publisher returned invalid settlement {type(result)!r}",
+            )
+        return result
 
-    def publish_event(self, event: Dict[str, Any], routing_key: str):
-        """Publish event using next available worker."""
-        worker = self._get_next_worker()
-        worker.tell(PublishEvent(event, routing_key))
-
-    def stop(self):
-        """Stop all worker actors."""
-        log.info("Stopping publisher pool...")
-        for i, worker in enumerate(self.workers):
-            try:
-                worker.stop()
-                log.info(f"Stopped publisher worker {i}")
-            except Exception as e:
-                log.warning(f"Error stopping publisher worker {i}: {e}")
+    def stop(self, timeout: float | None = None) -> None:
+        wait = self.shutdown_timeout if timeout is None else timeout
+        for worker in self.workers:
+            worker.stop(block=True, timeout=wait)
         self.workers.clear()
 
-    def get_proxy(self):
-        """Get a proxy object that mimics the original Publisher interface."""
+    def get_proxy(self) -> "PublisherPoolProxy":
         return PublisherPoolProxy(self)
 
 
 class PublisherPoolProxy:
-    """
-    Proxy object that mimics the original Publisher interface but uses the pool.
-    """
+    """Stable actor-like publisher facade."""
 
     def __init__(self, pool: PublisherPool):
         self.pool = pool
 
-    def tell(self, message):
-        """Handle tell() calls like a regular actor."""
-        log.debug(f"PublisherPoolProxy received message type: {type(message)}")
-        if isinstance(message, PublishDocument):
-            log.debug(f"Publishing document to routing key: {message.routing_key}")
-            self.pool.publish_document(message.doc, message.routing_key)
-        elif isinstance(message, PublishRelation):
-            log.debug(f"Publishing relation to routing key: {message.routing_key}")
-            self.pool.publish_relation(message.rel, message.routing_key)
-        elif isinstance(message, PublishEvent):
-            log.debug(f"Publishing event to routing key: {message.routing_key}")
-            self.pool.publish_event(message.event, message.routing_key)
-        else:
-            log.warning(f"PublisherPoolProxy: Unknown message type: {type(message)}")
+    def tell(self, message: PublishMessage) -> None:
+        self.pool.tell(message)
 
-    def stop(self):
-        """Stop the underlying pool."""
-        self.pool.stop()
+    def publish_required(
+        self, message: PublishMessage, timeout: float | None = None
+    ) -> PublishResult:
+        return self.pool.publish_required(message, timeout)
+
+    def stop(self, timeout: float | None = None) -> None:
+        self.pool.stop(timeout)

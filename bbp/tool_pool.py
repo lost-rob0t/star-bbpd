@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import itertools
 import logging
 import threading
@@ -23,6 +25,7 @@ class ToolActorPool:
         publisher_ref: Any,
         tool_config: Dict[str, Any],
         routing_config: Dict[str, Any],
+        shutdown_timeout: float = 60,
     ):
         if pool_size <= 0:
             raise ValueError("tool actor pool size must be positive")
@@ -35,6 +38,7 @@ class ToolActorPool:
         self.actors: List[pykka.ActorRef] = []
         self.round_robin = itertools.cycle(range(pool_size))
         self._lock = threading.Lock()
+        self.shutdown_timeout = shutdown_timeout
 
         for index in range(pool_size):
             actor_ref = tool_class.start(
@@ -43,17 +47,18 @@ class ToolActorPool:
             actor_ref.proxy().routing = routing_config
             self.actors.append(actor_ref)
 
-    def submit_target(self, target: Any, delivery_tag: int, consumer_ref: Any):
+    def submit_target(self, scan: ScanTarget) -> None:
         with self._lock:
             actor_ref = self.actors[next(self.round_robin)]
-        actor_ref.tell(ScanTarget(target, delivery_tag, consumer_ref))
+        actor_ref.tell(scan)
 
-    def stop(self):
+    def stop(self, timeout: float | None = None) -> None:
+        wait = self.shutdown_timeout if timeout is None else timeout
         for actor_ref in self.actors:
-            actor_ref.stop()
+            actor_ref.stop(block=True, timeout=wait)
         self.actors.clear()
 
-    def get_proxy(self):
+    def get_proxy(self) -> "ToolActorPoolProxy":
         return ToolActorPoolProxy(self)
 
 
@@ -71,19 +76,16 @@ class ToolActorPoolProxy:
                 type(message),
             )
             return
-        self.pool.submit_target(
-            message.target,
-            message.delivery_tag,
-            message.consumer_ref,
-        )
+        self.pool.submit_target(message)
 
-    def stop(self):
-        self.pool.stop()
+    def stop(self, timeout: float | None = None) -> None:
+        self.pool.stop(timeout)
 
 
 def create_tool_pools(config, publisher_ref, routing_config) -> Dict[str, ToolActorPool]:
     pools: Dict[str, ToolActorPool] = {}
     pool_size = config.service.get("tool_pool_size", 2)
+    shutdown_timeout = float(config.service.get("shutdown_timeout_sec", 60))
 
     for tool_name in config.enabled_actors():
         pools[tool_name] = ToolActorPool(
@@ -92,6 +94,7 @@ def create_tool_pools(config, publisher_ref, routing_config) -> Dict[str, ToolAc
             publisher_ref,
             config.get_tool_config(tool_name),
             routing_config,
+            shutdown_timeout,
         )
 
     return pools

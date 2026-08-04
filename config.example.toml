@@ -7,6 +7,10 @@ log_level = "INFO"
 json_pretty = false
 publisher_pool_size = 3
 tool_pool_size = 2
+publisher_max_retries = 3
+publisher_retry_delays_sec = [1, 2, 4]
+publish_settlement_timeout_sec = 30
+shutdown_timeout_sec = 60
 
 [documents]
 host = "localhost"
@@ -60,21 +64,25 @@ emit_relations = true
 [tools.subfinder]
 bin = "subfinder"
 timeout_sec = 300
+publish_timeout_sec = 30
 args = ["-silent"]
 
 [tools.nmap]
 bin = "nmap"
 timeout_sec = 1800
+publish_timeout_sec = 30
 args = ["-sV"]
 
 [tools.httpx]
 bin = "httpx"
 timeout_sec = 600
+publish_timeout_sec = 30
 args = ["-silent", "-json"]
 
 [tools.katana]
 bin = "katana"
 timeout_sec = 900
+publish_timeout_sec = 30
 args = ["-silent", "-json"]
 
 [dns_resolver]
@@ -82,4 +90,6 @@ enabled = true
 queue = "bbp.dns-resolver.domains"
 prefetch = 5
 timeout_sec = 5
+publish_timeout_sec = 30
+shutdown_timeout_sec = 60
 # nameservers = ["1.1.1.1", "1.0.0.1"]

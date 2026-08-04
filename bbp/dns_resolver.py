@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import logging
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import dns.resolver
 import pika
 import pykka
+import ulid
 
 from bbp.document_boundary import (
     CanonicalDocument,
@@ -17,12 +20,13 @@ from bbp.document_boundary import (
 )
 from bbp.events import create_event
 from bbp.publisher_pool import PublishDocument, PublishEvent
+from bbp.settlement import FailureKind, PublishResult, failure_decision
 
 log = logging.getLogger(__name__)
 
 
 class DnsResolverActor(pykka.ThreadingActor):
-    """Resolve persisted strict 0.9 domain documents and publish updates."""
+    """Resolve persisted domains and ACK only after the update is confirmed."""
 
     def __init__(
         self,
@@ -30,21 +34,25 @@ class DnsResolverActor(pykka.ThreadingActor):
         publisher_ref: Any,
         resolver_config: Dict[str, Any],
         routing_config: Dict[str, Any],
-    ):
+    ) -> None:
         super().__init__()
+        if not callable(getattr(publisher_ref, "publish_required", None)):
+            raise TypeError("publisher must provide publish_required(message, timeout)")
         self.actor_name = "dns-resolver"
         self.rabbit_config = rabbit_config
         self.publisher = publisher_ref
-        self.resolver_config = resolver_config
         self.routing_config = routing_config
         self.queue_name = resolver_config.get("queue", "bbp.dns-resolver.domains")
         self.prefetch = resolver_config.get("prefetch", 5)
-        self.consume_thread: Optional[threading.Thread] = None
-        self.connection: Optional[pika.BlockingConnection] = None
+        self.publish_timeout = float(resolver_config.get("publish_timeout_sec", 30))
+        self.shutdown_timeout = float(resolver_config.get("shutdown_timeout_sec", 60))
+        self.timeout = resolver_config.get("timeout_sec", 5)
+        self.consume_thread: threading.Thread | None = None
+        self.connection: pika.BlockingConnection | None = None
         self.channel = None
         self._stop_consuming = False
+        self._conn_lock = threading.Lock()
 
-        self.timeout = resolver_config.get("timeout_sec", 5)
         self.resolver = dns.resolver.Resolver()
         nameservers = resolver_config.get("nameservers")
         if nameservers:
@@ -52,7 +60,7 @@ class DnsResolverActor(pykka.ThreadingActor):
         self.resolver.timeout = self.timeout
         self.resolver.lifetime = self.timeout
 
-    def on_start(self):
+    def on_start(self) -> None:
         self._stop_consuming = False
         self.consume_thread = threading.Thread(
             target=self._consume_loop,
@@ -61,112 +69,173 @@ class DnsResolverActor(pykka.ThreadingActor):
         )
         self.consume_thread.start()
 
-    def on_stop(self):
+    def on_stop(self) -> None:
         self._stop_consuming = True
-        if self.connection and self.connection.is_open:
-            try:
-                self.connection.add_callback_threadsafe(self._stop_channel)
-            except Exception as exc:
-                log.warning("[dns-resolver] Failed to schedule consumer stop: %s", exc)
 
-        if self.consume_thread and self.consume_thread.is_alive():
-            self.consume_thread.join(timeout=5)
+        def stop() -> None:
+            if self.channel and self.channel.is_open:
+                self.channel.stop_consuming()
 
-        if self.connection and self.connection.is_open:
-            self.connection.close()
+        with self._conn_lock:
+            connection = self.connection
+        if connection and connection.is_open:
+            connection.add_callback_threadsafe(stop)
 
-    def _stop_channel(self) -> None:
-        if self.channel and self.channel.is_open:
-            self.channel.stop_consuming()
+        thread = self.consume_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=self.shutdown_timeout)
+        if thread and thread.is_alive():
+            raise RuntimeError("dns-resolver consumer did not stop cleanly")
 
-    def _consume_loop(self):
+    def _consume_loop(self) -> None:
+        connection = None
         try:
             params = pika.ConnectionParameters(
                 host=self.rabbit_config.get("host", "localhost"),
                 port=self.rabbit_config.get("port", 5672),
                 virtual_host=self.rabbit_config.get("vhost", "/"),
                 credentials=pika.PlainCredentials(
-                    username=self.rabbit_config.get("username", "guest"),
-                    password=self.rabbit_config.get("password", "guest"),
+                    self.rabbit_config.get("username", "guest"),
+                    self.rabbit_config.get("password", "guest"),
                 ),
                 heartbeat=self.rabbit_config.get("heartbeat_sec", 30),
             )
-            self.connection = pika.BlockingConnection(params)
-            self.channel = self.connection.channel()
-            self.channel.basic_qos(prefetch_count=self.prefetch)
-            self.channel.basic_consume(
+            connection = pika.BlockingConnection(params)
+            channel = connection.channel()
+            with self._conn_lock:
+                self.connection = connection
+                self.channel = channel
+            if self._stop_consuming:
+                return
+            channel.basic_qos(prefetch_count=self.prefetch)
+            channel.basic_consume(
                 queue=self.queue_name,
                 on_message_callback=self._handle_domain,
                 auto_ack=False,
             )
-            self.channel.start_consuming()
+            channel.start_consuming()
         except Exception as exc:
             if not self._stop_consuming:
-                log.error("[dns-resolver] Consumer failed: %s", exc, exc_info=True)
+                log.error("[dns-resolver] consumer failed: %s", exc, exc_info=True)
         finally:
-            if self.connection and self.connection.is_open:
-                self.connection.close()
+            if connection and connection.is_open:
+                connection.close()
+            with self._conn_lock:
+                self.connection = None
+                self.channel = None
 
-    def _handle_domain(self, channel, method, _properties, body):
+    def _handle_domain(self, channel, method, _properties, body) -> None:
+        run_id = str(ulid.new())
+        redelivered = bool(getattr(method, "redelivered", False))
         try:
             try:
                 domain = decode_domain(body)
             except DocumentBoundaryError as exc:
-                self._emit_parse_error(exc.category, str(exc), "")
+                self._emit_event(
+                    "parse-error",
+                    f"run_id={run_id}; category={exc.category}; disposition=ack; {exc}",
+                    "",
+                    run_id,
+                )
                 channel.basic_ack(delivery_tag=method.delivery_tag)
                 return
 
-            updated_domain = self._resolve_domain(domain)
-            if updated_domain:
-                routing_key = self.routing_config["document_update_key"].format(
-                    dtype="domain"
-                )
-                self.publisher.tell(PublishDocument(updated_domain, routing_key))
-
-            channel.basic_ack(delivery_tag=method.delivery_tag)
-        except Exception as exc:
-            log.error("[dns-resolver] Domain handling failed: %s", exc, exc_info=True)
-            channel.basic_ack(delivery_tag=method.delivery_tag)
-
-    def _resolve_domain(
-        self, domain: CanonicalDocument
-    ) -> Optional[CanonicalDocument]:
-        name = domain_name(domain)
-        addresses: list[str] = []
-        try:
-            for record_type in ("A", "AAAA"):
-                try:
-                    addresses.extend(
-                        str(value) for value in self.resolver.resolve(name, record_type)
-                    )
-                except (
-                    dns.resolver.NXDOMAIN,
-                    dns.resolver.NoAnswer,
-                    dns.resolver.NoNameservers,
-                ):
-                    continue
-
-            updated = with_domain_addresses(domain, addresses)
-            event_type = "dns-resolved" if addresses else "dns-no-records"
-            details = (
-                f"Resolved {len(addresses)} addresses for {name}"
-                if addresses
-                else f"No DNS records found for {name}"
+            updated = self._resolve_domain(domain, run_id)
+            routing_key = self.routing_config["document_update_key"].format(
+                dtype="domain"
             )
-            self._emit_event(event_type, details, domain.id)
-            return updated
-        except Exception as exc:
+            result = self.publisher.publish_required(
+                PublishDocument(updated, routing_key, run_id),
+                self.publish_timeout,
+            )
+            if not isinstance(result, PublishResult):
+                result = PublishResult.failure(
+                    routing_key,
+                    0,
+                    FailureKind.PERMANENT,
+                    f"invalid settlement result: {type(result)!r}",
+                )
+            if result.ok:
+                channel.basic_ack(delivery_tag=method.delivery_tag)
+                return
+
+            decision = failure_decision(
+                result.failure_kind or FailureKind.TRANSIENT,
+                redelivered=redelivered,
+            )
             self._emit_event(
                 "dns-error",
-                f"DNS resolution failed for {name}: {exc}",
+                (
+                    f"run_id={run_id}; update publish failed; "
+                    f"decision={decision.reason}; error={result.error}"
+                ),
                 domain.id,
+                run_id,
             )
-            return None
+            channel.basic_nack(
+                delivery_tag=method.delivery_tag,
+                requeue=decision.requeue,
+            )
+        except Exception as exc:
+            decision = failure_decision(
+                FailureKind.TRANSIENT,
+                redelivered=redelivered,
+            )
+            self._emit_event(
+                "dns-error",
+                f"run_id={run_id}; decision={decision.reason}; error={exc}",
+                "",
+                run_id,
+            )
+            channel.basic_nack(
+                delivery_tag=method.delivery_tag,
+                requeue=decision.requeue,
+            )
 
-    def _emit_parse_error(self, category: str, details: str, source_id: str):
-        self._emit_event("parse-error", f"category={category}; {details}", source_id)
+    def _resolve_domain(
+        self,
+        domain: CanonicalDocument,
+        run_id: str,
+    ) -> CanonicalDocument:
+        name = domain_name(domain)
+        addresses: list[str] = []
+        for record_type in ("A", "AAAA"):
+            try:
+                addresses.extend(
+                    str(value) for value in self.resolver.resolve(name, record_type)
+                )
+            except (
+                dns.resolver.NXDOMAIN,
+                dns.resolver.NoAnswer,
+                dns.resolver.NoNameservers,
+            ):
+                continue
 
-    def _emit_event(self, event_type: str, details: str, source_id: str):
+        updated = with_domain_addresses(domain, addresses)
+        event_type = "dns-resolved" if addresses else "dns-no-records"
+        details = (
+            f"run_id={run_id}; resolved {len(addresses)} addresses for {name}"
+            if addresses
+            else f"run_id={run_id}; no DNS records found for {name}"
+        )
+        self._emit_event(event_type, details, domain.id, run_id)
+        return updated
+
+    def _emit_event(
+        self,
+        event_type: str,
+        details: str,
+        source_id: str,
+        run_id: str,
+    ) -> None:
         event = create_event(self.actor_name, event_type, details, source_id)
         routing_key = self.routing_config["event_key"].format(eventType=event_type)
-        self.publisher.tell(PublishEvent(event, routing_key))
+        try:
+            self.publisher.tell(PublishEvent(event, routing_key, run_id))
+        except Exception as exc:
+            log.warning(
+                "[dns-resolver] run_id=%s best-effort event %s failed: %s",
+                run_id,
+                event_type,
+                exc,
+            )

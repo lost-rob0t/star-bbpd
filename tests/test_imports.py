@@ -12,6 +12,7 @@ import pytest
         "bbp.document_boundary",
         "bbp.publisher_pool",
         "bbp.rabbit",
+        "bbp.settlement",
         "bbp.topology",
         "bbp.tool_actor",
         "bbp.tool_pool",
