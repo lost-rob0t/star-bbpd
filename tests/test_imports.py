@@ -9,6 +9,7 @@ import pytest
         "bbp.main",
         "bbp.consumer",
         "bbp.dns_resolver",
+        "bbp.document_boundary",
         "bbp.publisher_pool",
         "bbp.tool_actor",
         "bbp.tool_pool",

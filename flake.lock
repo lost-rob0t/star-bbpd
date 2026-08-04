@@ -37,28 +37,7 @@
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
-        "nixpkgs": "nixpkgs",
-        "starintel-doc": "starintel-doc"
-      }
-    },
-    "starintel-doc": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1769029083,
-        "narHash": "sha256-f1Vkg+X7vI6x/0yrXxPuYnvxgsRTNwnKSpuffck0e2w=",
-        "owner": "lost-rob0t",
-        "repo": "starintel-doc",
-        "rev": "2a39132e7127cca57c501404b85e5d7b5688013a",
-        "type": "github"
-      },
-      "original": {
-        "owner": "lost-rob0t",
-        "repo": "starintel-doc",
-        "type": "github"
+        "nixpkgs": "nixpkgs"
       }
     },
     "systems": {

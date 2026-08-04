@@ -14,6 +14,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  STARINTEL_DOC_COMMIT: 980f7a217a0d28f22508c2f05831ceb2fefe8bd0
+  STARINTEL_SCHEMA_COMMIT: ff814ff63868286d68e21502122832802cd5e361
+
 jobs:
   config-safety:
     name: Config safety
@@ -51,6 +55,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout pinned StarIntel schema and fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: lost-rob0t/starintel-gpt-auto-dig
+          ref: ${{ env.STARINTEL_SCHEMA_COMMIT }}
+          path: conformance-source
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -61,6 +72,22 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --editable ".[dev]"
 
+      - name: Verify pinned StarIntel package
+        run: |
+          python - <<'PY'
+          from bbp.document_boundary import (
+              STARINTEL_DOC_COMMIT,
+              SCHEMA_COMMIT,
+              SCHEMA_REVISION,
+              load_schema_contract,
+          )
+          assert STARINTEL_DOC_COMMIT == "${{ env.STARINTEL_DOC_COMMIT }}"
+          assert SCHEMA_COMMIT == "${{ env.STARINTEL_SCHEMA_COMMIT }}"
+          assert load_schema_contract().schema_revision == SCHEMA_REVISION
+          PY
+        env:
+          STARINTEL_CONFORMANCE_ROOT: ${{ github.workspace }}/conformance-source
+
       - name: Compile
         run: python -m compileall -q bbp tests
 
@@ -69,6 +96,19 @@ jobs:
 
       - name: Test
         run: pytest --cov=bbp --cov-report=term-missing --cov-report=xml
+        env:
+          STARINTEL_CONFORMANCE_ROOT: ${{ github.workspace }}/conformance-source
+
+      - name: Run upstream Python conformance fixtures
+        if: matrix.python-version == '3.13'
+        working-directory: conformance-source
+        run: |
+          python -m conformance.runner test \
+            --producer python \
+            --consumer python \
+            --adapter "python=sh -c 'cd $GITHUB_WORKSPACE && python -m starintel_doc.conformance_adapter'"
+        env:
+          STARINTEL_CONFORMANCE_ROOT: ${{ github.workspace }}/conformance-source
 
       - name: Build package
         run: python -m build
@@ -83,18 +123,30 @@ jobs:
           name: coverage
           path: coverage.xml
 
+  nix:
+    name: Nix build and flake check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31.10.6
+      - run: nix flake check --show-trace
+      - run: nix build --show-trace
+
   quality-gate:
     name: Quality gate
     if: always()
     needs:
       - config-safety
       - python
+      - nix
     runs-on: ubuntu-latest
     steps:
       - name: Require all checks
         env:
           CONFIG_RESULT: ${{ needs.config-safety.result }}
           PYTHON_RESULT: ${{ needs.python.result }}
+          NIX_RESULT: ${{ needs.nix.result }}
         run: |
           test "$CONFIG_RESULT" = "success"
           test "$PYTHON_RESULT" = "success"
+          test "$NIX_RESULT" = "success"
