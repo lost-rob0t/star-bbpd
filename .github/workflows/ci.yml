@@ -32,7 +32,8 @@ jobs:
 
       - name: Reject retired production hostname
         run: |
-          if git grep -n "bots.star.intel" -- ':!*.lock'; then
+          retired_host='bots.star'".intel"
+          if git grep -n "$retired_host" -- ':!*.lock'; then
             echo "retired production broker hostname is still tracked"
             exit 1
           fi
