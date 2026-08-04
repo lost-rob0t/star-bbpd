@@ -1,56 +1,37 @@
 #!/usr/bin/env python3
 
-"""BBP Actor Service - Main entry point"""
+"""BBP Actor Service entry point."""
 
 import logging
 import signal
 import sys
 import time
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pykka
 
 from bbp.config import Config
-from bbp.rabbit import RabbitManager
-from bbp.publisher_pool import PublisherPool
 from bbp.consumer import TargetConsumer
 from bbp.dns_resolver import DnsResolverActor
 from bbp.events import create_event
+from bbp.publisher_pool import PublishEvent, PublisherPool, PublisherPoolProxy
+from bbp.rabbit import RabbitManager
 from bbp.tool_pool import create_tool_pools
-
 
 log = logging.getLogger(__name__)
 
 
-def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None):
-    """Setup logging configuration
-
-    Args:
-        log_level: Log level (DEBUG, INFO, WARNING, ERROR)
-        log_file: Path to log file (if None, logs to stdout only)
-    """
-    handlers = []
-
-    # Console handler (stdout)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(
-        logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-    )
-    handlers.append(console_handler)
-
-    # File handler (if log_file specified)
+def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None) -> None:
+    handlers: List[logging.Handler] = [logging.StreamHandler(sys.stdout)]
     if log_file:
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            )
-        )
-        handlers.append(file_handler)
+        handlers.append(logging.FileHandler(log_file))
+
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    for handler in handlers:
+        handler.setFormatter(formatter)
 
     logging.basicConfig(
         level=getattr(logging, log_level.upper(), logging.INFO),
@@ -59,176 +40,136 @@ def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None):
 
 
 def emit_service_event(
-    publisher: Any, event_type: str, details: str, routing_config: Dict[str, Any]
-):
-    """
-    Emit a service-level event.
-
-    Args:
-        publisher: Publisher pool proxy
-        event_type: Event type (service-start, service-ready, service-shutdown)
-        details: Event details
-        routing_config: Routing configuration
-    """
-    from bbp.publisher_pool import PublishEvent
-
+    publisher: PublisherPoolProxy,
+    event_type: str,
+    details: str,
+    routing_config: Dict[str, Any],
+) -> None:
     event = create_event("bbp-service", event_type, details, "")
     routing_key = routing_config["event_key"].format(eventType=event_type)
     publisher.tell(PublishEvent(event, routing_key))
 
 
-def main():
-    """Main entry point"""
-    # Parse command line args
+def declare_dns_queue(rabbit_manager: RabbitManager, config: Config) -> None:
+    dns_config = config.data.get("dns_resolver", {})
+    if not dns_config.get("enabled", False):
+        return
+
+    connection = rabbit_manager.new_connection(connection_name="bbp.dns-topology")
+    channel = None
+    try:
+        channel = connection.channel()
+        queue_name = dns_config.get("queue", "bbp.dns-resolver.domains")
+        exchange_name = config.documents.get("exchange", "documents")
+        routing_key = config.routing["document_new_key"].format(dtype="domain")
+        channel.queue_declare(queue=queue_name, durable=True)
+        channel.queue_bind(
+            queue=queue_name,
+            exchange=exchange_name,
+            routing_key=routing_key,
+        )
+        log.info("Declared DNS queue %s -> %s", queue_name, routing_key)
+    finally:
+        if channel and channel.is_open:
+            channel.close()
+        if connection.is_open:
+            connection.close()
+
+
+def main() -> None:
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.toml"
 
     try:
-        # Load and validate configuration
-        log.info(f"Loading configuration from: {config_path}")
         config = Config.load(config_path)
-        log.info("Configuration loaded and validated successfully")
-
-        # Setup logging
         setup_logging(
             config.service.get("log_level", "INFO"),
-            config.service.get("log_file")
+            config.service.get("log_file"),
         )
 
-        # Initialize RabbitMQ connection
-        log.info("Connecting to RabbitMQ...")
         rabbit_manager = RabbitManager(config.documents)
         if not rabbit_manager.connect():
-            log.error("Failed to connect to RabbitMQ. Exiting.")
-            sys.exit(1)
+            raise RuntimeError("failed to connect to RabbitMQ")
 
-        # Declare topology (exchanges, queues, bindings)
-        log.info("Declaring RabbitMQ topology...")
         enabled_actors = [
             (name, config.get_actor_config(name)) for name in config.enabled_actors()
         ]
-        routing_template = config.routing.get("target_key", "actors.{actor}.new.target")
-        rabbit_manager.declare_topology(
-            enabled_actors, routing_template
+        rabbit_manager.declare_topology(enabled_actors, config.routing["target_key"])
+        declare_dns_queue(rabbit_manager, config)
+
+        publisher_pool = PublisherPool(
+            rabbit_manager,
+            config.data,
+            config.service.get("publisher_pool_size", 3),
         )
-
-        # Declare DNS resolver queue if enabled
-        if "dns_resolver" in config.data and config.data["dns_resolver"].get("enabled", False):
-            log.info("Declaring DNS resolver queue...")
-            topology_conn = rabbit_manager.new_connection(connection_name="bbp.dns-topology")
-            try:
-                channel = topology_conn.channel()
-                dns_config = config.data["dns_resolver"]
-                queue_name = dns_config.get("queue", "bbp.dns-resolver.domains")
-                exchange_name = config.documents.get("exchange", "documents")
-                routing_key = "documents.new.domain"
-
-                log.info(f"Declaring DNS resolver queue: {queue_name} -> {routing_key}")
-                channel.queue_declare(queue=queue_name, durable=True)
-                channel.queue_bind(
-                    queue=queue_name, exchange=exchange_name, routing_key=routing_key
-                )
-                channel.close()
-            finally:
-                if topology_conn and topology_conn.is_open:
-                    topology_conn.close()
-
-        # Start Publisher pool
-        pool_size = config.service.get("publisher_pool_size", 3)
-        log.info(f"Starting Publisher pool with {pool_size} workers...")
-        publisher_pool = PublisherPool(rabbit_manager, config.data, pool_size)
         publisher = publisher_pool.get_proxy()
-        # Keep pool instance only for shutdown, use proxy for all publishing
-
-        # Safety assertions: fail fast if wiring is unsafe
-        from bbp.publisher_pool import PublisherPoolProxy
-        assert isinstance(publisher, PublisherPoolProxy), (
-            f"Publisher must be PublisherPoolProxy, got {type(publisher)}. "
-            "This prevents accidental use of unsafe publisher wiring."
-        )
-        assert hasattr(publisher, 'tell'), (
-            "Publisher proxy must have .tell() method for actor message passing"
-        )
-        assert pool_size > 0, "Publisher pool size must be > 0"
-        assert len(publisher_pool.workers) == pool_size, (
-            f"Publisher pool should have {pool_size} workers, got {len(publisher_pool.workers)}"
-        )
-        log.info(f"✓ Publisher safety checks passed: {pool_size} workers, PublisherPoolProxy interface")
-
-        # Emit service-start event
         emit_service_event(
-            publisher, "service-start", "BBP Actor Service starting", config.routing
+            publisher,
+            "service-start",
+            "BBP Actor Service starting",
+            config.routing,
         )
 
-        # Start Tool Actor Pools
-        log.info("Starting Tool Actor Pools...")
         tool_pools = create_tool_pools(config, publisher, config.routing)
-        tool_pool_proxies: Dict[str, Any] = {}
-        for tool_name, pool in tool_pools.items():
-            proxy = pool.get_proxy()
-            tool_pool_proxies[tool_name] = proxy
-            log.info(f"Started {tool_name} tool actor pool")
+        missing_pools = set(config.enabled_actors()) - set(tool_pools)
+        if missing_pools:
+            raise RuntimeError(
+                f"failed to create tool pools: {', '.join(sorted(missing_pools))}"
+            )
 
-        # Start DNS Resolver (if enabled)
         dns_resolver_ref = None
-        dns_resolver = None
-        if "dns_resolver" in config.data and config.data["dns_resolver"].get("enabled", False):
-            log.info("Starting DNS Resolver...")
+        dns_config = config.data.get("dns_resolver", {})
+        if dns_config.get("enabled", False):
             dns_resolver_ref = DnsResolverActor.start(
                 config.documents,
                 publisher,
-                config.data["dns_resolver"],
+                dns_config,
                 config.routing,
             )
-            dns_resolver = dns_resolver_ref.proxy()
-            log.info("Started DNS resolver")
 
-        # Start Target Consumers
-        log.info("Starting Target Consumers...")
-        consumers: List[Any] = []
         consumer_refs: List[Any] = []
         for actor_name in config.enabled_actors():
-            actor_config = config.get_actor_config(actor_name)
-            consumer_ref = TargetConsumer.start(
-                actor_name,
-                config.documents,  # Pass rabbit config instead of manager
-                publisher,  # Use proxy for consistent .tell() interface
-                tool_pool_proxies[actor_name],
-                actor_config,
-                config.routing,
+            consumer_refs.append(
+                TargetConsumer.start(
+                    actor_name,
+                    config.documents,
+                    publisher,
+                    tool_pools[actor_name].get_proxy(),
+                    config.get_actor_config(actor_name),
+                    config.routing,
+                )
             )
-            consumer = consumer_ref.proxy()
-            consumers.append(consumer)
-            consumer_refs.append(consumer_ref)
-            log.info(f"Started {actor_name} target consumer")
 
-        # Emit service-ready event
         emit_service_event(
-            publisher, "service-ready", "BBP Actor Service ready", config.routing
+            publisher,
+            "service-ready",
+            "BBP Actor Service ready",
+            config.routing,
         )
         log.info("BBP Actor Service is ready")
 
-        # Setup signal handlers for graceful shutdown
-        def signal_handler(sig, frame):
-            log.info(f"Received signal {sig}, shutting down...")
-            shutdown(consumer_refs, tool_pools, publisher_pool, rabbit_manager, config.routing, publisher, dns_resolver_ref)
+        def signal_handler(sig, _frame):
+            log.info("Received signal %s", sig)
+            shutdown(
+                consumer_refs,
+                tool_pools,
+                publisher_pool,
+                rabbit_manager,
+                config.routing,
+                publisher,
+                dns_resolver_ref,
+            )
 
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
-        # Wait forever (actors run in background)
-        log.info("Service running. Press Ctrl+C to stop.")
         while True:
             time.sleep(1)
-
-    except FileNotFoundError as e:
-        log.error(f"Configuration file not found: {e}")
-        sys.exit(1)
-    except ValueError as e:
-        log.error(f"Configuration error: {e}")
-        sys.exit(1)
-    except Exception as e:
-        log.error(f"Fatal error: {e}", exc_info=True)
-        sys.exit(1)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        log.error("Startup failed: %s", exc)
+        raise SystemExit(1) from exc
+    except Exception as exc:
+        log.error("Fatal error: %s", exc, exc_info=True)
+        raise SystemExit(1) from exc
 
 
 def shutdown(
@@ -237,24 +178,9 @@ def shutdown(
     publisher_pool: PublisherPool,
     rabbit_manager: RabbitManager,
     routing_config: Dict[str, Any],
-    publisher: Any,
+    publisher: PublisherPoolProxy,
     dns_resolver_ref: Optional[Any] = None,
-):
-    """
-    Graceful shutdown sequence.
-
-    Args:
-        consumer_refs: List of TargetConsumer actor references
-        tool_pools: Dict of tool actor pools
-        publisher_pool: PublisherPool instance for stopping workers
-        rabbit_manager: RabbitManager instance
-        routing_config: Routing configuration
-        publisher: PublisherPoolProxy for event emission
-        dns_resolver_ref: Optional DnsResolverActor reference
-    """
-    log.info("Shutting down BBP Actor Service...")
-
-    # Emit service-shutdown event
+) -> None:
     emit_service_event(
         publisher,
         "service-shutdown",
@@ -262,52 +188,20 @@ def shutdown(
         routing_config,
     )
 
-    # Stop DNS resolver
     if dns_resolver_ref:
-        log.info("Stopping DNS Resolver...")
-        try:
-            dns_resolver_ref.stop()
-        except Exception as e:
-            log.warning(f"Error stopping DNS resolver: {e}")
-
-    # Stop consumers (stop receiving new targets)
-    log.info("Stopping Target Consumers...")
+        dns_resolver_ref.stop()
     for consumer_ref in consumer_refs:
-        try:
-            consumer_ref.stop()
-        except Exception as e:
-            log.warning(f"Error stopping consumer: {e}")
+        consumer_ref.stop()
 
-    # Wait for in-flight scans to complete (with timeout)
-    log.info("Waiting for in-flight scans to complete...")
-    time.sleep(2)  # Give scans time to finish
+    time.sleep(2)
+    for pool in tool_pools.values():
+        pool.stop()
 
-    # Stop tool actor pools
-    log.info("Stopping Tool Actor Pools...")
-    for pool_name, pool in tool_pools.items():
-        try:
-            pool.stop()
-        except Exception as e:
-            log.warning(f"Error stopping {pool_name} pool: {e}")
-
-    # Stop publisher pool (flush pending publishes)
-    log.info("Stopping Publisher pool...")
-    try:
-        time.sleep(2)  # Give publishers time to flush
-        publisher_pool.stop()
-    except Exception as e:
-        log.warning(f"Error stopping publisher pool: {e}")
-
-    # Close RabbitMQ connections
-    log.info("Closing RabbitMQ connections...")
+    time.sleep(2)
+    publisher_pool.stop()
     rabbit_manager.close()
-
-    # Shutdown Pykka actor system
-    log.info("Shutting down Pykka actor system...")
     pykka.ActorRegistry.stop_all()
-
-    log.info("BBP Actor Service stopped")
-    sys.exit(0)
+    raise SystemExit(0)
 
 
 if __name__ == "__main__":
