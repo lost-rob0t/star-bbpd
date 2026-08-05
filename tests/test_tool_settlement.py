@@ -8,6 +8,8 @@ from bbp.consumer import AckMessage, NackMessage
 from bbp.settlement import FailureKind, PublishResult
 from bbp.tool_actor import ScanTarget, ToolActor
 
+NOW = "2026-08-05T12:00:00Z"
+
 
 @dataclass
 class FakeDoc:
@@ -24,6 +26,14 @@ class FakeDoc:
 class FakeTarget:
     target = "example.com"
     id = "target-1"
+
+    def to_dict(self):
+        return {
+            "_id": self.id,
+            "date_added": NOW,
+            "date_updated": NOW,
+            "extensions": {},
+        }
 
 
 class FakePublisher:
