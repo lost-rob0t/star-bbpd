@@ -6,14 +6,30 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
-from hashlib import md5
 from importlib import metadata
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-import ulid
 from starintel_doc import Document as StarIntelDocument
 from starintel_doc import SPEC_VERSION, UnsupportedVersion, ValidationError
+
+from bbp.determinism import (
+    DeterminismError,
+    RecursionRejected,
+    apply_provenance,
+    deterministic_document_id,
+    normalize_addresses,
+    normalize_domain_name,
+    normalize_ip_address,
+    normalize_predicate,
+    normalize_record_type,
+    normalize_service,
+    normalize_services,
+    normalize_text,
+    normalize_url,
+    relation_document_id,
+    stable_timestamp,
+)
 
 STARINTEL_DOC_VERSION = "0.9.0"
 STARINTEL_DOC_COMMIT = "980f7a217a0d28f22508c2f05831ceb2fefe8bd0"
@@ -69,6 +85,14 @@ class CanonicalDocument:
     @property
     def dataset(self) -> str:
         return self._document.value["dataset"]
+
+    @property
+    def date_added(self) -> str:
+        return self._document.value["date_added"]
+
+    @property
+    def date_updated(self) -> str:
+        return self._document.value["date_updated"]
 
     @property
     def sources(self) -> list[Source]:
@@ -218,9 +242,7 @@ def _schema(contract: SchemaContract | None) -> JsonObject:
     return (contract or load_schema_contract()).schema
 
 
-def _wrap(
-    value: JsonObject, contract: SchemaContract | None = None
-) -> CanonicalDocument:
+def _wrap(value: JsonObject, contract: SchemaContract | None = None) -> CanonicalDocument:
     try:
         return CanonicalDocument(StarIntelDocument.from_dict(value, _schema(contract)))
     except (UnsupportedVersion, ValidationError) as exc:
@@ -278,10 +300,10 @@ def target_dataset(target: TargetDocument) -> str:
 
 
 def derived_sources(target: TargetDocument, tool_name: str) -> list[Source]:
-    if not isinstance(tool_name, str) or not tool_name:
+    if not isinstance(tool_name, str) or not tool_name.strip():
         raise DocumentBoundaryError("wrong_type", "tool_name must be a non-empty string")
     sources = target.sources
-    tool_source: Source = {"kind": "tool", "name": tool_name}
+    tool_source: Source = {"kind": "tool", "name": tool_name.strip().lower()}
     if tool_source not in sources:
         sources.append(tool_source)
     return sources
@@ -291,8 +313,13 @@ def inherited_extensions(target: TargetDocument) -> JsonObject:
     return target.extensions
 
 
-def _legacy_hash_id(*values: object) -> str:
-    return md5("".join(map(str, values)).encode("utf-8")).hexdigest()
+def _boundary(operation):
+    try:
+        return operation()
+    except RecursionRejected:
+        raise
+    except DeterminismError as exc:
+        raise DocumentBoundaryError("invalid_canonical_value", str(exc)) from exc
 
 
 def _build(
@@ -305,24 +332,27 @@ def _build(
     extensions: Mapping[str, Any],
     contract: SchemaContract | None,
     now: str | None = None,
+    source: CanonicalDocument | None = None,
+    actor: str = "",
+    derivation: str = "",
 ) -> CanonicalDocument:
-    timestamp = now or _utc_now()
-    return _wrap(
-        {
-            "_id": document_id,
-            "dataset": dataset,
-            "dtype": dtype,
-            "schema_version": SCHEMA_VERSION,
-            "version": 1,
-            "date_added": timestamp,
-            "date_updated": timestamp,
-            "sources": deepcopy(list(sources)),
-            "evidence": [],
-            "data": deepcopy(data),
-            "extensions": deepcopy(dict(extensions)),
-        },
-        contract,
-    )
+    timestamp = now or (stable_timestamp(source.to_dict()) if source else _utc_now())
+    value: JsonObject = {
+        "_id": document_id,
+        "dataset": dataset,
+        "dtype": dtype,
+        "schema_version": SCHEMA_VERSION,
+        "version": 1,
+        "date_added": timestamp,
+        "date_updated": timestamp,
+        "sources": deepcopy(list(sources)),
+        "evidence": [],
+        "data": deepcopy(data),
+        "extensions": deepcopy(dict(extensions)),
+    }
+    if source is not None:
+        value = apply_provenance(source.to_dict(), value, actor, derivation)
+    return _wrap(value, contract)
 
 
 def build_target(
@@ -338,24 +368,22 @@ def build_target(
     contract: SchemaContract | None = None,
     now: str | None = None,
 ) -> TargetDocument:
-    for field, value in (
-        ("actor", actor),
-        ("target_value", target_value),
-        ("dataset", dataset),
-    ):
-        if not isinstance(value, str) or not value:
+    values = {}
+    for field, value in (("actor", actor), ("target", target_value), ("dataset", dataset)):
+        if not isinstance(value, str) or not value.strip():
             raise DocumentBoundaryError("wrong_type", f"{field} must be a non-empty string")
+        values[field] = value.strip()
     if isinstance(delay, bool) or not isinstance(delay, int):
         raise DocumentBoundaryError("wrong_type", "delay must be an integer")
     if not isinstance(recurring, bool):
         raise DocumentBoundaryError("wrong_type", "recurring must be a boolean")
     document = _build(
         dtype="target",
-        document_id=_legacy_hash_id(dataset, target_value, actor),
-        dataset=dataset,
+        document_id=deterministic_document_id("target", values),
+        dataset=values["dataset"],
         data={
-            "actor": actor,
-            "target": target_value,
+            "actor": values["actor"],
+            "target": values["target"],
             "delay": delay,
             "recurring": recurring,
             "options": deepcopy(list(options)),
@@ -378,36 +406,39 @@ def build_domain(
     contract: SchemaContract | None = None,
     now: str | None = None,
 ) -> CanonicalDocument:
-    if not isinstance(domain, str) or not domain.strip():
-        raise DocumentBoundaryError("wrong_type", "domain must be a non-empty string")
-    value = domain.strip()
-    return _build(
-        dtype="domain",
-        document_id=_legacy_hash_id(value, record_type),
-        dataset=target.dataset,
-        data={
+    def operation() -> CanonicalDocument:
+        value = normalize_domain_name(domain)
+        record = normalize_record_type(record_type)
+        addresses = normalize_addresses(resolved_addresses)
+        identity = {
+            "dataset": target.dataset,
             "domain": value,
-            "record_type": record_type,
-            "record": value,
-            "resolved_addresses": list(resolved_addresses),
-        },
-        sources=derived_sources(target, tool_name),
-        extensions=inherited_extensions(target),
-        contract=contract,
-        now=now,
-    )
+            "record_type": record,
+        }
+        return _build(
+            dtype="domain",
+            document_id=deterministic_document_id("domain", identity),
+            dataset=target.dataset,
+            data={
+                "domain": value,
+                "record_type": record,
+                "record": value,
+                "resolved_addresses": addresses,
+            },
+            sources=derived_sources(target, tool_name),
+            extensions=inherited_extensions(target),
+            contract=contract,
+            now=now,
+            source=target,
+            actor=tool_name,
+            derivation="domain-discovery",
+        )
+
+    return _boundary(operation)
 
 
 def build_service(port: int, name: str, version: str = "") -> Service:
-    if isinstance(port, bool) or not isinstance(port, int):
-        raise DocumentBoundaryError("wrong_type", "service port must be an integer")
-    if not 0 <= port <= 65535:
-        raise DocumentBoundaryError("out_of_range", "service port must be between 0 and 65535")
-    if not isinstance(name, str) or not name:
-        raise DocumentBoundaryError("wrong_type", "service name must be a non-empty string")
-    if not isinstance(version, str):
-        raise DocumentBoundaryError("wrong_type", "service version must be a string")
-    return {"port": port, "name": name, "version": version}
+    return _boundary(lambda: normalize_service({"port": port, "name": name, "version": version}))
 
 
 def build_host(
@@ -421,25 +452,36 @@ def build_host(
     contract: SchemaContract | None = None,
     now: str | None = None,
 ) -> CanonicalDocument:
+    def operation() -> CanonicalDocument:
+        normalized_hostname = normalize_domain_name(hostname) if hostname.strip() else ""
+        normalized_ip = normalize_ip_address(ip)
+        normalized_services = normalize_services(services)
+        normalized_os = normalize_text(os_name, "os")
+        data = {
+            "hostname": normalized_hostname,
+            "ip": normalized_ip,
+            "ports": normalized_services,
+            "os": normalized_os,
+        }
+        return _build(
+            dtype="host",
+            document_id=deterministic_document_id(
+                "host", {"dataset": target.dataset, **data}
+            ),
+            dataset=target.dataset,
+            data=data,
+            sources=derived_sources(target, tool_name),
+            extensions=inherited_extensions(target),
+            contract=contract,
+            now=now,
+            source=target,
+            actor=tool_name,
+            derivation="host-scan",
+        )
+
     if not isinstance(hostname, str):
         raise DocumentBoundaryError("wrong_type", "hostname must be a string")
-    if not isinstance(ip, str) or not ip:
-        raise DocumentBoundaryError("wrong_type", "ip must be a non-empty string")
-    return _build(
-        dtype="host",
-        document_id=_legacy_hash_id(ip),
-        dataset=target.dataset,
-        data={
-            "hostname": hostname,
-            "ip": ip,
-            "ports": deepcopy(list(services)),
-            "os": os_name,
-        },
-        sources=derived_sources(target, tool_name),
-        extensions=inherited_extensions(target),
-        contract=contract,
-        now=now,
-    )
+    return _boundary(operation)
 
 
 def build_url(
@@ -453,18 +495,35 @@ def build_url(
     contract: SchemaContract | None = None,
     now: str | None = None,
 ) -> CanonicalDocument:
-    if not isinstance(url, str) or not url:
-        raise DocumentBoundaryError("wrong_type", "url must be a non-empty string")
-    return _build(
-        dtype="url",
-        document_id=_legacy_hash_id(url, content),
-        dataset=target.dataset,
-        data={"url": url, "path": path, "query": query, "content": content},
-        sources=derived_sources(target, tool_name),
-        extensions=inherited_extensions(target),
-        contract=contract,
-        now=now,
-    )
+    if not all(isinstance(value, str) for value in (url, path, query, content)):
+        raise DocumentBoundaryError("wrong_type", "URL fields must be strings")
+
+    def operation() -> CanonicalDocument:
+        normalized = normalize_url(url)
+        data = {
+            "url": normalized.url,
+            "path": normalized.path,
+            "query": normalized.query,
+            "content": content,
+        }
+        return _build(
+            dtype="url",
+            document_id=deterministic_document_id(
+                "url",
+                {"dataset": target.dataset, "url": normalized.url, "content": content},
+            ),
+            dataset=target.dataset,
+            data=data,
+            sources=derived_sources(target, tool_name),
+            extensions=inherited_extensions(target),
+            contract=contract,
+            now=now,
+            source=target,
+            actor=tool_name,
+            derivation="url-discovery",
+        )
+
+    return _boundary(operation)
 
 
 def build_relation(
@@ -478,37 +537,48 @@ def build_relation(
     contract: SchemaContract | None = None,
     now: str | None = None,
 ) -> CanonicalDocument:
-    for field, value in (
-        ("source_id", source_id),
-        ("target_id", target_id),
-        ("predicate", predicate),
-    ):
-        if not isinstance(value, str) or not value:
+    for field, value in (("source_id", source_id), ("target_id", target_id)):
+        if not isinstance(value, str) or not value.strip():
             raise DocumentBoundaryError("wrong_type", f"{field} must be a non-empty string")
-    return _build(
-        dtype="relation",
-        document_id=str(ulid.new()),
-        dataset=target.dataset,
-        data={
-            "subject": source_id,
-            "predicate": predicate,
-            "object": target_id,
-            "source": source_id,
-            "target": target_id,
-            "directed": True,
-            "note": note,
-        },
-        sources=derived_sources(target, tool_name),
-        extensions=inherited_extensions(target),
-        contract=contract,
-        now=now,
-    )
+    if not isinstance(note, str):
+        raise DocumentBoundaryError("wrong_type", "note must be a string")
+
+    def operation() -> CanonicalDocument:
+        source_value = source_id.strip()
+        target_value = target_id.strip()
+        canonical_predicate = normalize_predicate(predicate)
+        document_id = relation_document_id(
+            target.dataset, source_value, canonical_predicate, target_value
+        )
+        return _build(
+            dtype="relation",
+            document_id=document_id,
+            dataset=target.dataset,
+            data={
+                "subject": source_value,
+                "predicate": canonical_predicate,
+                "object": target_value,
+                "source": source_value,
+                "target": target_value,
+                "directed": True,
+                "note": note,
+            },
+            sources=derived_sources(target, tool_name),
+            extensions=inherited_extensions(target),
+            contract=contract,
+            now=now,
+            source=target,
+            actor=tool_name,
+            derivation=f"relation:{canonical_predicate}",
+        )
+
+    return _boundary(operation)
 
 
 def domain_name(document: CanonicalDocument) -> str:
     if document.dtype != "domain":
         raise DocumentBoundaryError("unexpected_dtype", "expected domain document")
-    return _required_string(document._document.value["data"], "domain")
+    return _boundary(lambda: normalize_domain_name(_required_string(document.data, "domain")))
 
 
 def with_domain_addresses(
@@ -520,10 +590,22 @@ def with_domain_addresses(
 ) -> CanonicalDocument:
     if document.dtype != "domain":
         raise DocumentBoundaryError("unexpected_dtype", "expected domain document")
-    value = document.to_dict()
-    value["data"]["resolved_addresses"] = list(addresses)
-    value["date_updated"] = now or _utc_now()
-    return _wrap(value, contract)
+
+    def operation() -> CanonicalDocument:
+        value = document.to_dict()
+        domain = normalize_domain_name(_required_string(value["data"], "domain"))
+        record_type = normalize_record_type(value["data"].get("record_type", "A"))
+        value["data"]["domain"] = domain
+        value["data"]["record"] = domain
+        value["data"]["record_type"] = record_type
+        value["data"]["resolved_addresses"] = normalize_addresses(addresses)
+        value["date_updated"] = now or stable_timestamp(document.to_dict())
+        value = apply_provenance(
+            document.to_dict(), value, "dns-resolver", "dns-resolution"
+        )
+        return _wrap(value, contract)
+
+    return _boundary(operation)
 
 
 def serialize_document(document: CanonicalDocument, *, pretty: bool = False) -> str:

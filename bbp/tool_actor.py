@@ -9,8 +9,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import pykka
-import ulid
 
+from bbp.determinism import (
+    RecursionRejected,
+    logical_actor_name,
+    rejection_run_id,
+    validate_recursion,
+)
 from bbp.document_boundary import CanonicalDocument, TargetDocument
 from bbp.events import create_event
 from bbp.publisher_pool import PublishDocument, PublishEvent, PublishRelation
@@ -60,6 +65,7 @@ class ToolActor(pykka.ThreadingActor, ABC):
         if not callable(getattr(publisher_ref, "tell", None)):
             raise TypeError("publisher must provide tell(message)")
         self.actor_name = actor_name
+        self.provenance_actor = logical_actor_name(actor_name)
         self.publisher = publisher_ref
         self.tool_config = tool_config
         self.routing: Optional[Dict[str, Any]] = None
@@ -74,7 +80,18 @@ class ToolActor(pykka.ThreadingActor, ABC):
 
     def _execute_scan(self, scan: ScanTarget) -> ScanExecutionResult:
         target = scan.target
-        run_id = str(ulid.new())
+        target_value = target.to_dict()
+        try:
+            state = validate_recursion(target_value, self.provenance_actor)
+        except RecursionRejected as exc:
+            run_id = rejection_run_id(target_value, self.provenance_actor)
+            self._active_run_id = run_id
+            try:
+                return self._settle_rejection(scan, run_id, exc)
+            finally:
+                self._active_run_id = ""
+
+        run_id = state.run_id
         self._active_run_id = run_id
         doc_count = 0
         rel_count = 0
@@ -82,14 +99,14 @@ class ToolActor(pykka.ThreadingActor, ABC):
 
         self._emit_event(
             "scan-start",
-            f"run_id={run_id}; starting {self.actor_name} scan for {target.target}",
+            f"run_id={run_id}; starting {self.provenance_actor} scan",
             target.id,
             run_id,
         )
 
         try:
             cmd = self._build_command(target)
-            log.info("[%s] run_id=%s executing: %s", self.actor_name, run_id, " ".join(cmd))
+            log.info("[%s] run_id=%s executing tool", self.actor_name, run_id)
             timeout = self.tool_config.get("timeout_sec", 300)
             process = subprocess.Popen(
                 cmd,
@@ -136,7 +153,7 @@ class ToolActor(pykka.ThreadingActor, ABC):
             self._emit_event(
                 "scan-finished",
                 (
-                    f"run_id={run_id}; finished {self.actor_name} scan; "
+                    f"run_id={run_id}; finished {self.provenance_actor} scan; "
                     f"documents={doc_count}; relations={rel_count}"
                 ),
                 target.id,
@@ -152,22 +169,14 @@ class ToolActor(pykka.ThreadingActor, ABC):
         except RequiredPublishError as exc:
             kind = exc.result.failure_kind or FailureKind.TRANSIENT
             return self._settle_failure(
-                scan,
-                run_id,
-                doc_count,
-                rel_count,
-                kind,
-                str(exc),
+                scan, run_id, doc_count, rel_count, kind, str(exc)
             )
         except ScanFailure as exc:
             return self._settle_failure(
-                scan,
-                run_id,
-                doc_count,
-                rel_count,
-                exc.kind,
-                str(exc),
+                scan, run_id, doc_count, rel_count, exc.kind, str(exc)
             )
+        except RecursionRejected as exc:
+            return self._settle_rejection(scan, run_id, exc, doc_count, rel_count)
         except Exception as exc:
             log.error(
                 "[%s] run_id=%s scan failed: %s",
@@ -188,6 +197,36 @@ class ToolActor(pykka.ThreadingActor, ABC):
             if process is not None and process.poll() is None:
                 self._terminate_process(process)
             self._active_run_id = ""
+
+    def _settle_rejection(
+        self,
+        scan: ScanTarget,
+        run_id: str,
+        rejection: RecursionRejected,
+        document_count: int = 0,
+        relation_count: int = 0,
+    ) -> ScanExecutionResult:
+        decision = failure_decision(FailureKind.PERMANENT, redelivered=scan.redelivered)
+        error = f"{rejection.category}: {rejection}"
+        self._emit_event(
+            "scan-rejected",
+            (
+                f"run_id={run_id}; category={rejection.category}; "
+                f"decision={decision.reason}"
+            ),
+            scan.target.id,
+            run_id,
+        )
+        self._send_nack(scan.consumer_ref, scan.delivery_tag, False)
+        return ScanExecutionResult(
+            ok=False,
+            run_id=run_id,
+            document_count=document_count,
+            relation_count=relation_count,
+            failure_kind=FailureKind.PERMANENT,
+            decision=decision,
+            error=error,
+        )
 
     def _settle_failure(
         self,
@@ -229,9 +268,7 @@ class ToolActor(pykka.ThreadingActor, ABC):
             process.kill()
             process.wait(timeout=5)
 
-    def _require_publish(
-        self, message: PublishDocument | PublishRelation
-    ) -> PublishResult:
+    def _require_publish(self, message: PublishDocument | PublishRelation) -> PublishResult:
         result = self.publisher.publish_required(message, self.publish_timeout)
         if not isinstance(result, PublishResult):
             result = PublishResult.failure(
@@ -244,10 +281,7 @@ class ToolActor(pykka.ThreadingActor, ABC):
             raise RequiredPublishError(result)
         return result
 
-
-    def _emit_document(
-        self, doc: CanonicalDocument, run_id: str = ""
-    ) -> PublishResult:
+    def _emit_document(self, doc: CanonicalDocument, run_id: str = "") -> PublishResult:
         effective_run_id = run_id or getattr(self, "_active_run_id", "")
         return self._require_publish(
             PublishDocument(doc, self._document_key(doc), effective_run_id)
@@ -266,9 +300,7 @@ class ToolActor(pykka.ThreadingActor, ABC):
 
         consumer_ref.tell(AckMessage(delivery_tag))
 
-    def _send_nack(
-        self, consumer_ref: Any, delivery_tag: int, requeue: bool
-    ) -> None:
+    def _send_nack(self, consumer_ref: Any, delivery_tag: int, requeue: bool) -> None:
         from bbp.consumer import NackMessage
 
         consumer_ref.tell(NackMessage(delivery_tag, requeue))
@@ -304,8 +336,6 @@ class ToolActor(pykka.ThreadingActor, ABC):
         routing = self._require_routing()
         event = create_event(self.actor_name, event_type, details, source_id)
         routing_key = routing["event_key"].format(eventType=event_type)
-        # Lifecycle events are explicitly best-effort; required documents and
-        # relations use publish_required() above.
         try:
             self.publisher.tell(PublishEvent(event, routing_key, run_id))
         except Exception as exc:

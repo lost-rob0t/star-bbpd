@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import logging
 import threading
+from hashlib import sha256
 from typing import Any, Dict
 
 import dns.resolver
 import pika
 import pykka
-import ulid
 
+from bbp.determinism import RecursionRejected, validate_recursion
 from bbp.document_boundary import (
     CanonicalDocument,
     DocumentBoundaryError,
@@ -125,21 +126,38 @@ class DnsResolverActor(pykka.ThreadingActor):
                 self.channel = None
 
     def _handle_domain(self, channel, method, _properties, body) -> None:
-        run_id = str(ulid.new())
+        run_id = self._raw_run_id(body)
         redelivered = bool(getattr(method, "redelivered", False))
+        domain: CanonicalDocument | None = None
         try:
             try:
                 domain = decode_domain(body)
             except DocumentBoundaryError as exc:
                 self._emit_event(
                     "parse-error",
-                    f"run_id={run_id}; category={exc.category}; disposition=ack; {exc}",
+                    f"run_id={run_id}; category={exc.category}; disposition=ack",
                     "",
                     run_id,
                 )
                 channel.basic_ack(delivery_tag=method.delivery_tag)
                 return
 
+            try:
+                state = validate_recursion(domain.to_dict(), self.actor_name)
+            except RecursionRejected as exc:
+                self._emit_event(
+                    "dns-rejected",
+                    (
+                        f"run_id={run_id}; category={exc.category}; "
+                        "decision=permanent-no-requeue"
+                    ),
+                    domain.id,
+                    run_id,
+                )
+                channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+                return
+
+            run_id = state.run_id
             updated = self._resolve_domain(domain, run_id)
             routing_key = self.routing_config["document_update_key"].format(
                 dtype="domain"
@@ -176,6 +194,17 @@ class DnsResolverActor(pykka.ThreadingActor):
                 delivery_tag=method.delivery_tag,
                 requeue=decision.requeue,
             )
+        except RecursionRejected as exc:
+            self._emit_event(
+                "dns-rejected",
+                (
+                    f"run_id={run_id}; category={exc.category}; "
+                    "decision=permanent-no-requeue"
+                ),
+                domain.id if domain else "",
+                run_id,
+            )
+            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
         except Exception as exc:
             decision = failure_decision(
                 FailureKind.TRANSIENT,
@@ -184,7 +213,7 @@ class DnsResolverActor(pykka.ThreadingActor):
             self._emit_event(
                 "dns-error",
                 f"run_id={run_id}; decision={decision.reason}; error={exc}",
-                "",
+                domain.id if domain else "",
                 run_id,
             )
             channel.basic_nack(
@@ -214,12 +243,17 @@ class DnsResolverActor(pykka.ThreadingActor):
         updated = with_domain_addresses(domain, addresses)
         event_type = "dns-resolved" if addresses else "dns-no-records"
         details = (
-            f"run_id={run_id}; resolved {len(addresses)} addresses for {name}"
+            f"run_id={run_id}; resolved_addresses={len(addresses)}"
             if addresses
-            else f"run_id={run_id}; no DNS records found for {name}"
+            else f"run_id={run_id}; no DNS records found"
         )
         self._emit_event(event_type, details, domain.id, run_id)
         return updated
+
+    @staticmethod
+    def _raw_run_id(body: bytes | str) -> str:
+        payload = body.encode("utf-8") if isinstance(body, str) else body
+        return f"run:{sha256(payload).hexdigest()}"
 
     def _emit_event(
         self,

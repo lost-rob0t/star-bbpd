@@ -319,7 +319,10 @@ def test_extension_preservation(contract):
     document = build_domain(
         "api.example.com", target, "subfinder", contract=contract, now=NOW
     )
-    assert document.to_dict()["extensions"] == {"example.test": {"keep": True}}
+    extensions = document.to_dict()["extensions"]
+    assert extensions["example.test"] == {"keep": True}
+    assert extensions["star_server"]["actor"] == "subfinder"
+    assert extensions["star_server"]["parent_id"] == target.id
     assert {"kind": "tool", "name": "subfinder"} in document.to_dict()["sources"]
 
 
