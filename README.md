@@ -2,7 +2,54 @@
 
 Python/Pykka external actor service for StarIntel reconnaissance tools.
 
-`star-bbpd` consumes actor-specific targets from RabbitMQ, runs Subfinder, Nmap, Httpx, and Katana, and publishes derived StarIntel documents, relations, and actor events.
+`star-bbpd` consumes actor-specific targets from RabbitMQ, runs Subfinder, Nmap,
+Httpx, Katana, and DNS workflows, and publishes derived StarIntel documents,
+relations, and actor events.
+
+## Position in the Quasar / StarIntel stack
+
+BBPD is a **runtime service**, not a Quasar browser feature.
+
+```text
+quasar-ui
+  browser UI / graph renderer / standalone subset
+        |
+        | typed commands, projections, capability discovery
+        v
+quasar
+  canonical Common Lisp control plane/runtime
+        |
+        | StarIntel service APIs and adapters
+        v
+starintel-server
+  persistent ingest / storage / search / routing / RabbitMQ
+        |
+        +-----------------------------+
+        |                             |
+        v                             v
+star-bbpd                       other actor services
+  recon tool actors              collectors / analyzers / tools
+```
+
+The component responsibilities are deliberately different:
+
+- `quasar-ui` presents controls, graphs, documents, status and results. Its
+  standalone browser mode has a bounded browser-safe capability set.
+- `quasar` owns the canonical Common Lisp command/control boundary for migrated
+  durable Quasar operations, persistent runtime supervision, privileged local
+  integrations, reconnect/replay and capability discovery.
+- `starintel-server` persists and routes StarIntel documents and provides the
+  backend RabbitMQ/CouchDB/HTTP service boundaries assigned to it.
+- `star-bbpd` runs external reconnaissance tooling behind the actor-service
+  boundary and publishes normalized results back into StarIntel.
+
+A Quasar UI button that submits a BBPD target does **not** make Subfinder, Nmap,
+Httpx, Katana or DNS scanning browser capabilities. Connected clients should
+discover whether BBPD is available and present that capability accordingly.
+
+BBPD remains independently deployable and supervised. Quasar may expose its
+controls, health, logs and results without reimplementing the service in
+JavaScript.
 
 ## Current migration state
 
