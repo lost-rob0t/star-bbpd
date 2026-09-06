@@ -25,6 +25,11 @@ from bbp.settlement import FailureKind, PublishResult, failure_decision
 
 log = logging.getLogger(__name__)
 
+# TODO(starlang-migration):
+# DNS settlement becomes a StarLang domain actor; recovery/reconnect is
+# expected to follow STAR-LANG-RESEARCH-017 (worker reconnect preserves
+# domain state) once that contract is stable outside the prototype.
+
 
 class DnsResolverActor(pykka.ThreadingActor):
     """Resolve persisted domains and ACK only after the update is confirmed."""

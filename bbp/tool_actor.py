@@ -29,6 +29,14 @@ from bbp.settlement import (
 
 log = logging.getLogger(__name__)
 
+# TODO(starlang-migration):
+# ToolActor is the core BBPD domain actor. Per STAR-LANG-RESEARCH-014 it
+# becomes a StarLang domain-server keyed program actor (key: program-id) with
+# run-identity replay rules from STAR-LANG-RESEARCH-016
+# (star.bbp.run-id-conflict / star.bbp.program-registration-conflict).
+# Until the StarLang actor/runtime contract is stable, the Pykka actor stays
+# authoritative and only the settlement/provenance contracts below are shared.
+
 
 @dataclass(frozen=True, slots=True)
 class ScanTarget:

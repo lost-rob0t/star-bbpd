@@ -16,13 +16,16 @@ RabbitMQ connections and channels are owned by exactly one consumer or publisher
 
 | Operation | Routing key |
 |-----------+-------------|
-| external target delivery | =actors.<actor>.new.target= |
+| external target delivery (canonical) | =documents.target.dispatch.<actor>= |
+| external target delivery (compat) | =actors.<actor>.new.target= |
 | durable new finding | =documents.ingest.<dtype>= |
 | persisted-document event | =documents.new.<dtype>= |
 | update ingest | =documents.updated.<dtype>= |
 | actor event | =event.<eventType>= |
 
-All required document and relation messages are persistent UTF-8 JSON with AMQP =type= equal to canonical =dtype=.
+Both target-delivery keys bind to the same durable actor queue; the canonical key is optional configuration for deployments still on the legacy target router.
+
+All required document and relation messages are persistent UTF-8 JSON with AMQP =type= equal to canonical =dtype=. Actor events carry =dtype: actorevent= and a non-negative =generation= per the starintel-server event contract.
 
 * 3. Publisher settlement
 
@@ -109,6 +112,10 @@ Shutdown is mailbox-driven and has no fixed sleeps.
 Every blocking stop is bounded by =shutdown_timeout_sec=.
 
 * 7. Configuration
+
+Identity:
+
+- =service.star_authority= — canonical STAR authority; actor service URIs are =star://<authority>/actor/<actor>= (STAR-RESEARCH-041). Legacy =star://domain:address:actor-name= tuples are compatibility input only and are never emitted.
 
 Required settlement controls:
 
