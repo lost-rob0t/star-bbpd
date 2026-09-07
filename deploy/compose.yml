@@ -1,0 +1,41 @@
+# Reusable StarIntel actor-service compose.
+#
+# One file runs any StarIntel actor container. The environment selects the
+# image, the actor config, and the target docker network:
+#
+#   staging eval (joins the local starintel stack):
+#     STARINTEL_ACTOR_PROJECT=starintel-bbpd-staging \
+#     ACTOR_IMAGE=starintel/bbpd:0.1.0-staging \
+#     ACTOR_CONTAINER=starintel-bbpd-staging-1 \
+#     ACTOR_HOSTNAME=bbpd-staging \
+#     ACTOR_CONFIG=$PWD/staging/config.toml \
+#     docker compose -f deploy/compose.yml up -d
+#
+#   prod promotion: `nix run .#promote-bbpd` ships this file to the Proxmox
+#   ingest host (CT114 `starintel`) and runs it there with the prod image
+#   and a config generated from that host's own secrets.
+name: ${STARINTEL_ACTOR_PROJECT:-starintel-bbpd}
+
+services:
+  bbpd:
+    image: ${ACTOR_IMAGE:-starintel/bbpd:0.1.0-staging}
+    container_name: ${ACTOR_CONTAINER:-starintel-bbpd-1}
+    hostname: ${ACTOR_HOSTNAME:-bbpd}
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ${ACTOR_CONFIG:?set ACTOR_CONFIG to the actor config.toml}
+        target: /etc/starintel-bbpd/config.toml
+        read_only: true
+    networks:
+      - backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  backend:
+    name: ${STARINTEL_NETWORK:-starintel_backend}
+    external: true
