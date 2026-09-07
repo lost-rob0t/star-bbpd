@@ -58,7 +58,7 @@ jobs:
       - name: Checkout pinned StarIntel schema and fixtures
         uses: actions/checkout@v4
         with:
-          repository: lost-rob0t/starintel-gpt-auto-dig
+          repository: nsaspy/starintel-gpt-auto-dig
           ref: ${{ env.STARINTEL_SCHEMA_COMMIT }}
           path: conformance-source
 
@@ -139,7 +139,7 @@ jobs:
       - name: Checkout pinned StarIntel schema
         uses: actions/checkout@v4
         with:
-          repository: lost-rob0t/starintel-gpt-auto-dig
+          repository: nsaspy/starintel-gpt-auto-dig
           ref: ${{ env.STARINTEL_SCHEMA_COMMIT }}
           path: conformance-source
 
@@ -216,7 +216,7 @@ jobs:
       - name: Checkout pinned StarIntel schema
         uses: actions/checkout@v4
         with:
-          repository: lost-rob0t/starintel-gpt-auto-dig
+          repository: nsaspy/starintel-gpt-auto-dig
           ref: ${{ env.STARINTEL_SCHEMA_COMMIT }}
           path: conformance-source
 
