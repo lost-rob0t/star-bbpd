@@ -61,6 +61,18 @@ Completed under epic #1:
 - centralized durable RabbitMQ topology;
 - publisher-confirmed required outputs and settlement-driven ACK/NACK behavior.
 
+Completed in the runtime-modernization pass:
+
+- canonical STAR actor identity (`star://<authority>/actor/<actor>`, RFC 3986
+  authority/resource model from STAR-RESEARCH-041 / STAR-LANG-004);
+- dual target-delivery bindings: the canonical
+  `documents.target.dispatch.<actor>` key used by the durable target
+  coordinator in current `starintel-server`, plus the legacy
+  `actors.<actor>.new.target` compatibility key;
+- events conform to the server event contract (`dtype: "actorevent"`,
+  `generation`), not just its lenient decode defaults;
+- startup publishes an actor manifest with canonical STAR URIs.
+
 Deterministic relation identity and recursive provenance remain issue #5. The timeout-safe subprocess/parser lifecycle remains issue #6.
 
 ## StarIntel contract
@@ -83,7 +95,8 @@ producer
   -> star-server persists target
   -> documents.new.target
   -> star-server target router
-  -> actors.<actor>.new.target
+  -> documents.target.dispatch.<actor>        (canonical, durable coordinator)
+       or actors.<actor>.new.target           (legacy compatibility)
   -> star-bbpd tool actor
        -> documents.ingest.domain|host|url|relation
        -> broker publisher confirm
@@ -141,10 +154,13 @@ cp config.example.toml config.toml
 $EDITOR config.toml
 ```
 
-Settlement settings:
+Identity and settlement settings:
 
 ```toml
 [service]
+# Canonical STAR authority (RFC 3986): actor service URIs are published as
+# star://<authority>/actor/<actor> (STAR-RESEARCH-041 / STAR-LANG-004).
+star_authority = "bbpd.starintel.actor"
 publisher_max_retries = 3
 publisher_retry_delays_sec = [1, 2, 4]
 publish_settlement_timeout_sec = 30
@@ -156,11 +172,13 @@ publish_timeout_sec = 30
 
 The same `publish_timeout_sec` option is available for every tool and the DNS resolver.
 
-Routing templates remain configurable:
+Routing templates remain configurable. The canonical dispatch key is
+optional; older deployments that omit it bind only the compatibility key:
 
 ```toml
 [routing]
-target_key = "actors.{actor}.new.target"
+target_key = "actors.{actor}.new.target"                      # legacy compat
+target_dispatch_key = "documents.target.dispatch.{actor}"     # canonical
 document_ingest_key = "documents.ingest.{dtype}"
 document_update_key = "documents.updated.{dtype}"
 document_new_key = "documents.new.{dtype}"
@@ -216,6 +234,65 @@ Run Nix validation:
 nix flake check
 nix build
 ```
+
+## Architecture
+
+BBPD stays BBPD: the tool actors and domain logic are deliberately not
+rewritten. The runtime boundary is layered so every layer can be replaced
+independently:
+
+```text
+BBPD domain actors (Subfinder / Nmap / Httpx / Katana / DNS)
+        |  scan settlement, deterministic IDs, recursive provenance
+        v
+BBPD runtime adapter (this repository's bbp.* modules)
+        |  star:// identity, event contract, topology, publisher pool
+        v
+modern StarIntel runtime/protocol (starintel-server)
+        |  strict 0.9 documents, at-least-once delivery, quarantine
+        v
+RabbitMQ (durable work)  /  CouchDB (persistence via starintel-server)
+```
+
+Rules encoded in this layering:
+
+- the actors never touch RabbitMQ; only the publisher pool and consumers do;
+- `bbp.star_uri` owns identity; transport endpoints never leak into it;
+- routing templates stay in TOML configuration, never in code.
+
+## Future StarLang migration
+
+BBPD is **not** ported to StarLang yet. The eventual migration is
+`BBPD domain actors -> native StarLang actors`, and this repository is
+structured so it requires no further infrastructure rewrite when it happens.
+
+Temporary (marked `TODO(starlang-migration)` in source) and what must be
+stable first:
+
+| Component | StarLang replacement | Blocked on |
+|-----------|----------------------|------------|
+| `bbp.tool_actor.ToolActor` | StarLang domain-server keyed program actor | STAR-LANG-RESEARCH-014 domain-server contract promoted out of prototype |
+| `bbp.document_boundary` | StarLang typed document contracts | STAR-LANG-RESEARCH-024/025 proof obligations |
+| `bbp.dns_resolver` | StarLang domain actor with recovery | STAR-LANG-RESEARCH-017 reconnect/journal outside prototype |
+| `bbp.events` payload | StarLang journal records | STAR-LANG-RESEARCH-017 journal durability (fsync, checksums) |
+| `bbp.star_uri` | shared STAR URI library projection | STAR-SERVER-041 Phase A/C shared URI conformance fixtures |
+
+Permanent (not a StarLang target): `bbp.rabbit`, `bbp.topology`,
+`bbp.publisher_pool` — transport and settlement remain RabbitMQ adapters per
+the STAR-RESEARCH-041 durable-dataflow rule. `bbp.config` remains deployment
+material.
+
+Run-identity rules that the current implementation already honors and the
+StarLang actor must inherit (STAR-LANG-RESEARCH-016): a scan is identified by
+`program-id + run-id + tool + target`; replay returns the stored result; a
+changed tool/target under the same identity is terminal
+(`star.bbp.run-id-conflict`).
+
+Research references: STAR-RESEARCH-041 (star:// authority model, RabbitMQ
+durable dataflow), STAR-LANG-004 (manifest/identity projection, bbpd
+authority examples), STAR-LANG-RESEARCH-014/016/017 (BBP domain server, run
+identity, runtime journal), starintel-server `source/target-dispatch.lisp`
+and `source/actor-systems/event-actor.lisp` (current wire contracts).
 
 ## Migration loop
 

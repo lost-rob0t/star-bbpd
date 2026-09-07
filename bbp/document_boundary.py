@@ -44,6 +44,12 @@ JsonObject = dict[str, Any]
 Source = dict[str, Any]
 Service = dict[str, Any]
 
+# TODO(starlang-migration):
+# This boundary is the Python projection of the StarIntel 0.9 document
+# contract. It remains until StarLang typed document contracts
+# (STAR-LANG-RESEARCH-024/025) are consumable by external actors; the wire
+# schema, deterministic IDs, and provenance fields are already shared.
+
 
 class DocumentBoundaryError(ValueError):
     def __init__(self, category: str, message: str) -> None:

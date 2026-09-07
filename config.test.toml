@@ -2,6 +2,7 @@
 
 [service]
 name = "bbp-actors-test"
+star_authority = "bbpd.test.actor"
 log_level = "DEBUG"
 json_pretty = false
 publisher_pool_size = 1
@@ -23,6 +24,7 @@ exchange_type = "topic"
 
 [routing]
 target_key = "actors.{actor}.new.target"
+target_dispatch_key = "documents.target.dispatch.{actor}"
 document_ingest_key = "documents.ingest.{dtype}"
 document_update_key = "documents.updated.{dtype}"
 document_new_key = "documents.new.{dtype}"

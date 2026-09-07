@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
+from bbp.star_uri import parse_star_uri
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -26,9 +28,31 @@ class Config:
         "event_key": "{eventType}",
     }
 
+    # Optional template for the canonical remote target dispatch key
+    # (starintel-server target-dispatch.lisp). Older configs that omit it
+    # keep working; when present it must carry the {actor} placeholder.
+    OPTIONAL_ROUTING_FIELDS = {
+        "target_dispatch_key": "{actor}",
+    }
+
+    DEFAULT_STAR_AUTHORITY = "bbpd.starintel.actor"
+
     def __init__(self, data: Dict[str, Any]):
         self.data = data
+        self._apply_defaults()
         self._validate()
+
+    def _apply_defaults(self) -> None:
+        routing = self.data.setdefault("routing", {})
+        for field, placeholder in self.OPTIONAL_ROUTING_FIELDS.items():
+            routing.setdefault(field, None)
+
+    def star_authority(self) -> str:
+        """Canonical STAR authority for this deployment (STAR-RESEARCH-041)."""
+        authority = self.service.get("star_authority", self.DEFAULT_STAR_AUTHORITY)
+        if not isinstance(authority, str) or not authority.strip():
+            raise ValueError("service.star_authority must be a non-empty string")
+        return authority.strip().lower()
 
     @classmethod
     def load(cls, path: str) -> "Config":
@@ -61,6 +85,22 @@ class Config:
                 raise ValueError(
                     f"[routing].{field} must contain the {placeholder} placeholder"
                 )
+
+        for field, placeholder in self.OPTIONAL_ROUTING_FIELDS.items():
+            template = self.routing.get(field)
+            if template is None:
+                continue
+            if not isinstance(template, str) or not template:
+                raise ValueError(f"[routing].{field} must be a non-empty string")
+            if placeholder not in template:
+                raise ValueError(
+                    f"[routing].{field} must contain the {placeholder} placeholder"
+                )
+
+        try:
+            parse_star_uri(f"star://{self.star_authority()}/service/identity")
+        except Exception as exc:
+            raise ValueError(f"service.star_authority is not a valid STAR authority: {exc}") from exc
 
         self._require_positive_int(
             "service.publisher_pool_size", self.service.get("publisher_pool_size", 3)

@@ -18,6 +18,7 @@ from bbp.dns_resolver import DnsResolverActor
 from bbp.events import create_event
 from bbp.publisher_pool import PublishEvent, PublisherPool, PublisherPoolProxy
 from bbp.rabbit import RabbitManager
+from bbp.star_uri import actor_service_uri
 from bbp.tool_pool import create_tool_pools
 from bbp.topology import build_topology
 
@@ -40,6 +41,22 @@ def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None) -> No
         level=getattr(logging, log_level.upper(), logging.INFO),
         handlers=handlers,
     )
+
+
+def actor_manifest(config: Config) -> Dict[str, str]:
+    """Canonical STAR actor URIs published by this service at startup.
+
+    TODO(starlang-migration):
+    This in-process manifest is the BBPD stand-in for StarLang portable
+    actor manifests (STAR-LANG-004). It remains until StarLang manifests
+    and the shared runtime directory are consumable by external services;
+    the canonical URIs are already the durable identity contract.
+    """
+    authority = config.star_authority()
+    return {
+        actor: actor_service_uri(authority, actor)
+        for actor in config.enabled_actors()
+    }
 
 
 def emit_service_event(
@@ -119,10 +136,13 @@ def main() -> None:
         emit_service_event(
             publisher,
             "service-ready",
-            "BBP Actor Service ready",
+            "BBP Actor Service ready; actors="
+            + ",".join(
+                f"{actor}@{uri}" for actor, uri in actor_manifest(config).items()
+            ),
             config.routing,
         )
-        log.info("BBP Actor Service is ready")
+        log.info("BBP Actor Service is ready; actor manifest: %s", actor_manifest(config))
 
         def signal_handler(sig, _frame):
             log.info("Received signal %s", sig)

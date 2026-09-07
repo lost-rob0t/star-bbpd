@@ -3,6 +3,9 @@
 
 [service]
 name = "bbp-actors"
+# Canonical STAR authority for this deployment (STAR-RESEARCH-041).
+# Actor service URIs are published as star://<authority>/actor/<actor>.
+star_authority = "bbpd.starintel.actor"
 log_level = "INFO"
 json_pretty = false
 publisher_pool_size = 3
@@ -27,7 +30,11 @@ exchange = "events"
 exchange_type = "topic"
 
 [routing]
+# target_key is the legacy compatibility key; target_dispatch_key is the
+# canonical durable remote-target key emitted by current starintel-server.
+# Both are bound to every actor queue.
 target_key = "actors.{actor}.new.target"
+target_dispatch_key = "documents.target.dispatch.{actor}"
 document_ingest_key = "documents.ingest.{dtype}"
 document_update_key = "documents.updated.{dtype}"
 document_new_key = "documents.new.{dtype}"

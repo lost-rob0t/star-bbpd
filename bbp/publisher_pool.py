@@ -19,6 +19,11 @@ from bbp.settlement import FailureKind, PublishResult
 
 log = logging.getLogger(__name__)
 
+# TODO(starlang-migration):
+# Transport stays RabbitMQ (STAR-RESEARCH-041 durable-dataflow rule): this
+# pool is a settlement adapter, not domain logic, and is expected to survive
+# the StarLang migration as the BBPD runtime transport binding.
+
 JSON_CONTENT_TYPE = "application/json"
 JSON_CONTENT_ENCODING = "utf-8"
 
