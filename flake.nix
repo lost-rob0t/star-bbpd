@@ -123,6 +123,8 @@
         images = import ./nix/images.nix {
           inherit pkgs python starintelSchemaSrc star-bbpd;
         };
+
+        promote-bbpd = import ./nix/promote.nix { inherit pkgs; };
       in
       {
         packages.default = star-bbpd;
@@ -154,6 +156,11 @@
         apps.default = {
           type = "app";
           program = "${star-bbpd}/bin/star-bbpd";
+        };
+
+        apps.promote-bbpd = {
+          type = "app";
+          program = "${promote-bbpd}/bin/promote-bbpd";
         };
       }
     );
