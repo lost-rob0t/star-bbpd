@@ -31,6 +31,7 @@ config.toml
 .env
 .env.*
 !.env.example
+staging/
 
 # IDEs
 .vscode/

@@ -119,10 +119,17 @@
             license = licenses.mit;
           };
         };
+
+        images = import ./nix/images.nix {
+          inherit pkgs python starintelSchemaSrc star-bbpd;
+        };
       in
       {
         packages.default = star-bbpd;
         packages.star-bbpd = star-bbpd;
+        packages.star-bbpd-image = images.bbpdStagingImage;
+        packages.star-bbpd-staging-tools = images.bbpdStagingTools;
+        packages.star-bbpd-prod-image = images.bbpdProdImage;
         checks.default = star-bbpd;
 
         devShells.default = pkgs.mkShell {
