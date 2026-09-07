@@ -16,12 +16,16 @@ pytestmark = pytest.mark.skipif(
     reason="RabbitMQ identity integration is disabled",
 )
 
+# CI service containers on the Forgejo runner are reachable by DNS alias, not
+# localhost; the workflow overrides this to the service name.
+BROKER_HOST = os.environ.get("BBPD_TEST_RABBITMQ_HOST", "127.0.0.1")
+
 NOW = "2026-08-05T12:00:00Z"
 
 
 def connection():
     return pika.BlockingConnection(
-        pika.ConnectionParameters(host="127.0.0.1", port=5672, heartbeat=0)
+        pika.ConnectionParameters(host=BROKER_HOST, port=5672, heartbeat=0)
     )
 
 
@@ -38,7 +42,7 @@ def test_replay_after_confirm_before_ack_reuses_document_and_relation_ids():
 
     manager = RabbitManager(
         {
-            "host": "127.0.0.1",
+            "host": BROKER_HOST,
             "port": 5672,
             "vhost": "/",
             "username": "guest",

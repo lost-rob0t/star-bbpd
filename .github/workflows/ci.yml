@@ -198,11 +198,12 @@ jobs:
   rabbitmq-routing:
     name: RabbitMQ routing replay and settlement
     runs-on: ubuntu-latest
+    # No `ports` mapping: on the shared Forgejo runner host, publishing 5672
+    # collides with any concurrent job that does the same. The service is
+    # reachable from the job container by its DNS alias on the job network.
     services:
       rabbitmq:
         image: rabbitmq:3.13-alpine
-        ports:
-          - 5672:5672
         options: >-
           --health-cmd "rabbitmq-diagnostics -q ping"
           --health-interval 5s
@@ -236,6 +237,7 @@ jobs:
             tests/test_rabbitmq_identity_integration.py
         env:
           BBPD_RABBITMQ_INTEGRATION: "1"
+          BBPD_TEST_RABBITMQ_HOST: rabbitmq
           STARINTEL_CONFORMANCE_ROOT: ${{ github.workspace }}/conformance-source
 
   nix:
