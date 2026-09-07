@@ -58,14 +58,13 @@ jobs:
       - name: Checkout pinned StarIntel schema and fixtures
         uses: actions/checkout@v4
         with:
-          repository: lost-rob0t/starintel-gpt-auto-dig
+          repository: nsaspy/starintel-gpt-auto-dig
           ref: ${{ env.STARINTEL_SCHEMA_COMMIT }}
           path: conformance-source
 
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
 
       - name: Install project and CI tools
         run: |
@@ -95,7 +94,7 @@ jobs:
         run: ruff check bbp tests
 
       - name: Test
-        run: pytest --cov=bbp --cov-report=term-missing --cov-report=xml
+        run: pytest --cov=bbp --cov-report=term-missing
         env:
           STARINTEL_CONFORMANCE_ROOT: ${{ github.workspace }}/conformance-source
 
@@ -116,93 +115,72 @@ jobs:
       - name: Verify dependency graph
         run: python -m pip check
 
-      - name: Upload coverage
-        if: matrix.python-version == '3.13'
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage
-          path: coverage.xml
-
   determinism:
-    name: Determinism Python ${{ matrix.python-version }}
+    name: Determinism across Python versions
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version:
-          - "3.10"
-          - "3.13"
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Checkout pinned StarIntel schema
         uses: actions/checkout@v4
         with:
-          repository: lost-rob0t/starintel-gpt-auto-dig
+          repository: nsaspy/starintel-gpt-auto-dig
           ref: ${{ env.STARINTEL_SCHEMA_COMMIT }}
           path: conformance-source
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
+          python-version: "3.10"
 
-      - name: Install project
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install --editable ".[dev]"
+      - name: Install project for 3.10
+        run: python -m venv /tmp/venv310 && /tmp/venv310/bin/pip install --editable ".[dev]"
 
-      - name: Run deterministic identity and provenance contract
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install project for 3.13
+        run: python -m venv /tmp/venv313 && /tmp/venv313/bin/pip install --editable ".[dev]"
+
+      - name: Run deterministic contract on 3.10
         run: |
-          pytest -q \
+          STARINTEL_CONFORMANCE_ROOT=$GITHUB_WORKSPACE/conformance-source \
+            /tmp/venv310/bin/pytest -q \
             tests/test_deterministic_identity.py \
             tests/test_recursive_provenance.py \
             tests/test_recursion_settlement.py \
             tests/test_source_guards.py \
             tests/test_tool_settlement.py \
             tests/test_dns_settlement.py
-        env:
-          STARINTEL_CONFORMANCE_ROOT: ${{ github.workspace }}/conformance-source
 
-      - name: Produce deterministic process probe
-        run: PYTHONHASHSEED=random python tests/determinism_probe.py > determinism.txt
+      - name: Run deterministic contract on 3.13
+        run: |
+          STARINTEL_CONFORMANCE_ROOT=$GITHUB_WORKSPACE/conformance-source \
+            /tmp/venv313/bin/pytest -q \
+            tests/test_deterministic_identity.py \
+            tests/test_recursive_provenance.py \
+            tests/test_recursion_settlement.py \
+            tests/test_source_guards.py \
+            tests/test_tool_settlement.py \
+            tests/test_dns_settlement.py
 
-      - name: Upload deterministic process probe
-        uses: actions/upload-artifact@v4
-        with:
-          name: determinism-${{ matrix.python-version }}
-          path: determinism.txt
-
-  cross-version-determinism:
-    name: Cross-version deterministic serialization
-    runs-on: ubuntu-latest
-    needs:
-      - determinism
-    steps:
-      - name: Download Python 3.10 probe
-        uses: actions/download-artifact@v4
-        with:
-          name: determinism-3.10
-          path: python-3.10
-
-      - name: Download Python 3.13 probe
-        uses: actions/download-artifact@v4
-        with:
-          name: determinism-3.13
-          path: python-3.13
-
-      - name: Require byte-equivalent serialization
-        run: cmp python-3.10/determinism.txt python-3.13/determinism.txt
+      - name: Require byte-equivalent serialization across versions
+        run: |
+          PYTHONHASHSEED=random /tmp/venv310/bin/python tests/determinism_probe.py \
+            > /tmp/determinism-3.10.txt
+          PYTHONHASHSEED=random /tmp/venv313/bin/python tests/determinism_probe.py \
+            > /tmp/determinism-3.13.txt
+          cmp /tmp/determinism-3.10.txt /tmp/determinism-3.13.txt
 
   rabbitmq-routing:
     name: RabbitMQ routing replay and settlement
     runs-on: ubuntu-latest
+    # No `ports` mapping: on the shared Forgejo runner host, publishing 5672
+    # collides with any concurrent job that does the same. The service is
+    # reachable from the job container by its DNS alias on the job network.
     services:
       rabbitmq:
         image: rabbitmq:3.13-alpine
-        ports:
-          - 5672:5672
         options: >-
           --health-cmd "rabbitmq-diagnostics -q ping"
           --health-interval 5s
@@ -215,14 +193,13 @@ jobs:
       - name: Checkout pinned StarIntel schema
         uses: actions/checkout@v4
         with:
-          repository: lost-rob0t/starintel-gpt-auto-dig
+          repository: nsaspy/starintel-gpt-auto-dig
           ref: ${{ env.STARINTEL_SCHEMA_COMMIT }}
           path: conformance-source
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-          cache: pip
 
       - name: Install project
         run: |
@@ -236,6 +213,7 @@ jobs:
             tests/test_rabbitmq_identity_integration.py
         env:
           BBPD_RABBITMQ_INTEGRATION: "1"
+          BBPD_TEST_RABBITMQ_HOST: rabbitmq
           STARINTEL_CONFORMANCE_ROOT: ${{ github.workspace }}/conformance-source
 
   nix:
@@ -243,7 +221,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v31.10.6
+      # Full URL: the forge does not mirror cachix/install-nix-action under
+      # its action alias, so the owner/repo shorthand fails to clone there.
+      - uses: https://github.com/cachix/install-nix-action@v31.10.6
       - run: nix flake check --show-trace
       - run: nix build --show-trace
 
@@ -254,7 +234,6 @@ jobs:
       - config-safety
       - python
       - determinism
-      - cross-version-determinism
       - rabbitmq-routing
       - nix
     runs-on: ubuntu-latest
@@ -264,13 +243,11 @@ jobs:
           CONFIG_RESULT: ${{ needs.config-safety.result }}
           PYTHON_RESULT: ${{ needs.python.result }}
           DETERMINISM_RESULT: ${{ needs.determinism.result }}
-          CROSS_VERSION_RESULT: ${{ needs.cross-version-determinism.result }}
           RABBITMQ_RESULT: ${{ needs.rabbitmq-routing.result }}
           NIX_RESULT: ${{ needs.nix.result }}
         run: |
           test "$CONFIG_RESULT" = "success"
           test "$PYTHON_RESULT" = "success"
           test "$DETERMINISM_RESULT" = "success"
-          test "$CROSS_VERSION_RESULT" = "success"
           test "$RABBITMQ_RESULT" = "success"
           test "$NIX_RESULT" = "success"

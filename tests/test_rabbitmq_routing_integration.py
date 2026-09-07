@@ -18,6 +18,10 @@ pytestmark = pytest.mark.skipif(
     reason="RabbitMQ integration is disabled",
 )
 
+# CI service containers on the Forgejo runner are reachable by DNS alias, not
+# localhost; the workflow overrides this to the service name.
+BROKER_HOST = os.environ.get("BBPD_TEST_RABBITMQ_HOST", "127.0.0.1")
+
 
 class IntegrationConfig:
     documents = {"exchange": "documents", "exchange_type": "topic"}
@@ -53,7 +57,7 @@ class WireDoc:
 
 def _connection():
     return pika.BlockingConnection(
-        pika.ConnectionParameters(host="127.0.0.1", port=5672, heartbeat=0)
+        pika.ConnectionParameters(host=BROKER_HOST, port=5672, heartbeat=0)
     )
 
 
@@ -145,7 +149,7 @@ def test_publisher_worker_confirms_success_and_detects_unroutable_output():
 
     manager = RabbitManager(
         {
-            "host": "127.0.0.1",
+            "host": BROKER_HOST,
             "port": 5672,
             "vhost": "/",
             "username": "guest",
