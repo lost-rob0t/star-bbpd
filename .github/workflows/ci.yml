@@ -17,6 +17,8 @@ concurrency:
 env:
   STARINTEL_DOC_COMMIT: 980f7a217a0d28f22508c2f05831ceb2fefe8bd0
   STARINTEL_SCHEMA_COMMIT: ff814ff63868286d68e21502122832802cd5e361
+  STAR_SERVER_REF: feature/actor-runtime-discovery-20260908
+  QUASAR_REF: feature/actor-runtime-discovery-20260908
 
 jobs:
   config-safety:
@@ -238,6 +240,224 @@ jobs:
           BBPD_RABBITMQ_INTEGRATION: "1"
           STARINTEL_CONFORMANCE_ROOT: ${{ github.workspace }}/conformance-source
 
+  live-actor-ui:
+    name: Live Star Server + BBPD + Quasar Playwright
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      rabbitmq:
+        image: rabbitmq:4.3.4-management
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      couchdb:
+        image: couchdb:3.5.2
+        ports:
+          - 5984:5984
+        env:
+          COUCHDB_USER: admin
+          COUCHDB_PASSWORD: password
+        options: >-
+          --health-cmd "curl -f http://localhost:5984/_up || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - name: Checkout BBPD under test
+        uses: actions/checkout@v4
+
+      - name: Checkout StarIntel Server actor-discovery head
+        uses: actions/checkout@v4
+        with:
+          repository: lost-rob0t/starintel-server
+          ref: ${{ env.STAR_SERVER_REF }}
+          path: live/starintel-server
+
+      - name: Checkout Quasar actor-discovery head
+        uses: actions/checkout@v4
+        with:
+          repository: lost-rob0t/quasar
+          ref: ${{ env.QUASAR_REF }}
+          path: live/quasar
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: live/quasar/package-lock.json
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Install BBPD and create live manifest configuration
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --editable ".[dev]"
+          cat >"$RUNNER_TEMP/live-bbpd.toml" <<'EOF'
+          [service]
+          name = "bbp-actors"
+          log_level = "INFO"
+          publisher_pool_size = 1
+          tool_pool_size = 1
+          publisher_max_retries = 1
+          publisher_retry_delays_sec = [1]
+          publish_settlement_timeout_sec = 10
+          shutdown_timeout_sec = 10
+          manifest_http_enabled = true
+          manifest_http_host = "127.0.0.1"
+          manifest_http_port = 8765
+
+          [documents]
+          host = "127.0.0.1"
+          port = 5672
+          vhost = "/"
+          username = "guest"
+          password = "guest"
+          exchange = "documents"
+          exchange_type = "topic"
+          heartbeat_sec = 30
+
+          [events]
+          exchange = "events"
+          exchange_type = "topic"
+
+          [routing]
+          target_key = "actors.{actor}.new.target"
+          document_ingest_key = "documents.ingest.{dtype}"
+          document_update_key = "documents.updated.{dtype}"
+          document_new_key = "documents.new.{dtype}"
+          event_key = "event.{eventType}"
+
+          [actors.subfinder]
+          enabled = true
+          queue = "bbp.subfinder.targets"
+          prefetch = 1
+          emit_relations = true
+
+          [tools.subfinder]
+          bin = "true"
+          timeout_sec = 30
+          publish_timeout_sec = 10
+          args = []
+
+          [dns_resolver]
+          enabled = false
+          EOF
+
+      - name: Build the packaged StarIntel server
+        run: |
+          nix build ./live/starintel-server#default \
+            --out-link "$RUNNER_TEMP/star-server" \
+            --print-build-logs
+
+      - name: Start live BBPD and packaged StarIntel server
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m bbp.main "$RUNNER_TEMP/live-bbpd.toml" \
+            >"$RUNNER_TEMP/star-bbpd.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/star-bbpd.pid"
+
+          (
+            cd live/starintel-server
+            env \
+              COUCHDB_HOST=127.0.0.1 \
+              COUCHDB_USER=admin \
+              COUCHDB_PASSWORD=password \
+              COUCHDB_DATABASE=starintel \
+              RABBITMQ_ADDRESS=127.0.0.1 \
+              RABBITMQ_USER=guest \
+              RABBITMQ_PASSWORD=guest \
+              HTTP_API_LISTEN_ADDRESS=127.0.0.1 \
+              STAR_AUTH_MODE=disabled \
+              STAR_AUTH_DEV_BYPASS=true \
+              STAR_AUTH_PEPPER=ci-pepper \
+              STAR_AUTH_INITIAL_PASSWORD=ci-password \
+              STAR_AUTH_ALLOWED_ORIGINS=http://127.0.0.1:5173 \
+              STAR_ACTOR_MANIFEST_URLS=http://127.0.0.1:8765/api/v1/actors \
+              "$RUNNER_TEMP/star-server/bin/star-server" start \
+                --init ./example_configs/init.lisp \
+                >"$RUNNER_TEMP/star-server.log" 2>&1 &
+            echo $! >"$RUNNER_TEMP/star-server.pid"
+          )
+
+      - name: Require live local Lisp and remote BBPD discovery
+        run: |
+          set -euo pipefail
+          timeout 90 bash -c 'until curl --fail --silent http://127.0.0.1:8765/healthz >/dev/null; do sleep 2; done'
+          timeout 180 bash -c 'until curl --fail --silent http://127.0.0.1:5000/ready >/dev/null; do sleep 2; done'
+          curl --fail --silent --show-error http://127.0.0.1:5000/api/v1/actors \
+            | tee "$RUNNER_TEMP/actor-discovery.json"
+          jq -e '.data.actors[] | select(.id == "actor-event-receiver" and .service.language == "common-lisp" and .runtime.location == "local" and .runtime.transport == "sento")' \
+            "$RUNNER_TEMP/actor-discovery.json" >/dev/null
+          jq -e '.data.actors[] | select(.id == "subfinder" and .service.kind == "star-bbpd" and .service.language == "python" and .runtime.location == "remote" and .runtime.transport == "rabbitmq")' \
+            "$RUNNER_TEMP/actor-discovery.json" >/dev/null
+
+      - name: Install Quasar real-stack dependencies
+        working-directory: live/quasar
+        run: |
+          set -euo pipefail
+          npm ci
+          sudo apt-get update --quiet
+          sudo apt-get install --yes --quiet \
+            sbcl curl git libffi-dev libssl-dev libsqlite3-dev librabbitmq-dev
+          curl --fail --silent --show-error --output /tmp/quicklisp.lisp \
+            https://beta.quicklisp.org/quicklisp.lisp
+          sbcl --non-interactive \
+            --load /tmp/quicklisp.lisp \
+            --eval '(quicklisp-quickstart:install :path #p"/home/runner/quicklisp/")'
+          printf '%s\n' '(load #p"/home/runner/quicklisp/setup.lisp")' > /home/runner/.sbclrc
+          bash scripts/bootstrap-lisp-deps
+          node scripts/check-native-runtime.mjs
+          ./node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Playwright proves both actor runtimes in Quasar UI
+        working-directory: live/quasar
+        env:
+          STAR_ACTOR_E2E_SERVER_URL: http://127.0.0.1:5000
+          PLAYWRIGHT_HTML_OPEN: never
+        run: npm run test:e2e -- live-actor-discovery.spec.ts --reporter=github,html
+
+      - name: Upload live actor diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-actor-ui-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/actor-discovery.json
+            ${{ runner.temp }}/star-bbpd.log
+            ${{ runner.temp }}/star-server.log
+            live/quasar/frontend/playwright-report/
+            live/quasar/frontend/test-results/
+
+      - name: Stop live services
+        if: always()
+        shell: bash
+        run: |
+          for pid_file in "$RUNNER_TEMP/star-server.pid" "$RUNNER_TEMP/star-bbpd.pid"; do
+            if [ -f "$pid_file" ]; then
+              pid="$(cat "$pid_file")"
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+            fi
+          done
+
   nix:
     name: Nix build and flake check
     runs-on: ubuntu-latest
@@ -256,6 +476,7 @@ jobs:
       - determinism
       - cross-version-determinism
       - rabbitmq-routing
+      - live-actor-ui
       - nix
     runs-on: ubuntu-latest
     steps:
@@ -266,6 +487,7 @@ jobs:
           DETERMINISM_RESULT: ${{ needs.determinism.result }}
           CROSS_VERSION_RESULT: ${{ needs.cross-version-determinism.result }}
           RABBITMQ_RESULT: ${{ needs.rabbitmq-routing.result }}
+          LIVE_ACTOR_UI_RESULT: ${{ needs.live-actor-ui.result }}
           NIX_RESULT: ${{ needs.nix.result }}
         run: |
           test "$CONFIG_RESULT" = "success"
@@ -273,4 +495,5 @@ jobs:
           test "$DETERMINISM_RESULT" = "success"
           test "$CROSS_VERSION_RESULT" = "success"
           test "$RABBITMQ_RESULT" = "success"
+          test "$LIVE_ACTOR_UI_RESULT" = "success"
           test "$NIX_RESULT" = "success"
