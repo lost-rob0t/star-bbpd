@@ -16,6 +16,7 @@ from bbp.config import Config
 from bbp.consumer import StopIntake, TargetConsumer
 from bbp.dns_resolver import DnsResolverActor
 from bbp.events import create_event
+from bbp.manifest_http import ActorManifestHttpServer, start_manifest_http
 from bbp.publisher_pool import PublishEvent, PublisherPool, PublisherPoolProxy
 from bbp.rabbit import RabbitManager
 from bbp.tool_pool import create_tool_pools
@@ -116,6 +117,7 @@ def main() -> None:
                 )
             )
 
+        manifest_server = start_manifest_http(config)
         emit_service_event(
             publisher,
             "service-ready",
@@ -135,6 +137,7 @@ def main() -> None:
                 publisher,
                 dns_resolver_ref,
                 float(config.service.get("shutdown_timeout_sec", 60)),
+                manifest_server=manifest_server,
             )
 
         signal.signal(signal.SIGINT, signal_handler)
@@ -167,6 +170,7 @@ def shutdown(
     publisher: PublisherPoolProxy,
     dns_resolver_ref: Optional[Any] = None,
     shutdown_timeout: float = 60,
+    manifest_server: Optional[ActorManifestHttpServer] = None,
 ) -> None:
     emit_service_event(
         publisher,
@@ -174,6 +178,9 @@ def shutdown(
         "BBP Actor Service shutting down after in-flight settlement",
         routing_config,
     )
+
+    if manifest_server is not None:
+        manifest_server.stop()
 
     # Stop new target intake while keeping consumer actors alive to receive
     # settlement ACK/NACK messages from in-flight tool actors.

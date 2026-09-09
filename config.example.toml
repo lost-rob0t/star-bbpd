@@ -11,6 +11,10 @@ publisher_max_retries = 3
 publisher_retry_delays_sec = [1, 2, 4]
 publish_settlement_timeout_sec = 30
 shutdown_timeout_sec = 60
+# Optional read-only actor deployment-manifest discovery surface.
+manifest_http_enabled = false
+manifest_http_host = "127.0.0.1"
+manifest_http_port = 8765
 
 [documents]
 host = "localhost"
