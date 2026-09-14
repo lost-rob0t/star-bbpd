@@ -15,12 +15,12 @@
 
         starintelDocSrc = builtins.fetchGit {
           url = "https://github.com/lost-rob0t/starintel-doc.git";
-          rev = "980f7a217a0d28f22508c2f05831ceb2fefe8bd0";
+          rev = "5857914a1e34ad18a6956b8ff0df5349de0ca099";
         };
 
         starintelSchemaSrc = builtins.fetchGit {
           url = "https://github.com/lost-rob0t/starintel-gpt-auto-dig.git";
-          rev = "ff814ff63868286d68e21502122832802cd5e361";
+          rev = "6479c0a9dc88ce9fed183515fc4df5d245de0b3a";
         };
 
         tools = with pkgs; [
@@ -51,7 +51,7 @@
 
         starintel-doc-pkg = pythonPackages.buildPythonPackage {
           pname = "starintel_doc";
-          version = "0.9.0";
+          version = "0.9.1";
           format = "pyproject";
           src = starintelDocSrc;
 
