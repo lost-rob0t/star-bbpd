@@ -137,7 +137,8 @@ def contract(tmp_path: Path):
         json.dumps(
             {
                 "schema_version": "0.9.0",
-                "schema_revision": "0.9.0+fields.20260726.2",
+                "release_version": "0.9.1",
+                "schema_revision": "0.9.0+fields.20260909.1",
             }
         ),
         encoding="utf-8",
@@ -331,7 +332,13 @@ def test_schema_revision_mismatch(tmp_path: Path):
     manifest_path = tmp_path / "starintel-doc-v0.9.0.manifest.json"
     schema_path.write_text(json.dumps(schema()), encoding="utf-8")
     manifest_path.write_text(
-        json.dumps({"schema_version": "0.9.0", "schema_revision": "wrong"}),
+        json.dumps(
+            {
+                "schema_version": "0.9.0",
+                "release_version": "0.9.1",
+                "schema_revision": "wrong",
+            }
+        ),
         encoding="utf-8",
     )
     load_schema_contract.cache_clear()
@@ -339,9 +346,32 @@ def test_schema_revision_mismatch(tmp_path: Path):
         load_schema_contract(schema_path, manifest_path)
 
 
+def test_release_version_mismatch(tmp_path: Path):
+    schema_path = tmp_path / "starintel-doc-v0.9.0.schema.json"
+    manifest_path = tmp_path / "starintel-doc-v0.9.0.manifest.json"
+    schema_path.write_text(json.dumps(schema()), encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "0.9.0",
+                "release_version": "0.9.0",
+                "schema_revision": "0.9.0+fields.20260909.1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    load_schema_contract.cache_clear()
+    with pytest.raises(SchemaRevisionMismatch, match="release='0.9.0'"):
+        load_schema_contract(schema_path, manifest_path)
+
+
 def test_package_revision_mismatch():
     with pytest.raises(SchemaRevisionMismatch):
         verify_package_contract("0.8.2")
+
+
+def test_package_revision_accepts_091():
+    verify_package_contract("0.9.1")
 
 
 def test_legacy_flat_target_is_not_adapted(contract):
@@ -374,6 +404,13 @@ def test_legacy_flat_target_is_not_adapted(contract):
 def test_builders_against_pinned_schema():
     load_schema_contract.cache_clear()
     pinned = load_schema_contract()
+    assert pinned.release_version == "0.9.1"
+    dtype_names = {
+        branch.get("if", {}).get("properties", {}).get("dtype", {}).get("const")
+        for branch in pinned.schema.get("allOf", [])
+    }
+    assert {"observation", "operation"} <= dtype_names
+
     target = decode_target(json.dumps(target_value()), contract=pinned)
     domain = build_domain(
         "api.example.com", target, "subfinder", contract=pinned, now=NOW

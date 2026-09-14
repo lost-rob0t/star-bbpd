@@ -13,7 +13,7 @@ dependencies = [
     "pykka>=4,<5",
     "ulid-py>=1.1,<2",
     "tomli>=2,<3; python_version<'3.11'",
-    "starintel-doc @ git+https://github.com/lost-rob0t/starintel-doc.git@980f7a217a0d28f22508c2f05831ceb2fefe8bd0",
+    "starintel-doc @ git+https://github.com/lost-rob0t/starintel-doc.git@5857914a1e34ad18a6956b8ff0df5349de0ca099",
 ]
 
 [project.optional-dependencies]

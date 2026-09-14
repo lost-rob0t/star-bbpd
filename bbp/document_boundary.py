@@ -31,12 +31,13 @@ from bbp.determinism import (
     stable_timestamp,
 )
 
-STARINTEL_DOC_VERSION = "0.9.0"
-STARINTEL_DOC_COMMIT = "980f7a217a0d28f22508c2f05831ceb2fefe8bd0"
+STARINTEL_DOC_VERSION = "0.9.1"
+STARINTEL_DOC_COMMIT = "5857914a1e34ad18a6956b8ff0df5349de0ca099"
 SCHEMA_VERSION = "0.9.0"
-SCHEMA_REVISION = "0.9.0+fields.20260726.2"
+RELEASE_VERSION = "0.9.1"
+SCHEMA_REVISION = "0.9.0+fields.20260909.1"
 SCHEMA_REPOSITORY = "lost-rob0t/starintel-gpt-auto-dig"
-SCHEMA_COMMIT = "ff814ff63868286d68e21502122832802cd5e361"
+SCHEMA_COMMIT = "6479c0a9dc88ce9fed183515fc4df5d245de0b3a"
 SCHEMA_FILENAME = "starintel-doc-v0.9.0.schema.json"
 SCHEMA_MANIFEST_FILENAME = "starintel-doc-v0.9.0.manifest.json"
 
@@ -61,6 +62,7 @@ class SchemaContract:
     schema: JsonObject
     schema_path: Path
     manifest_path: Path
+    release_version: str
     schema_revision: str
     schema_commit: str
 
@@ -222,17 +224,24 @@ def load_schema_contract(
     schema = _read_object(schema_file, "StarIntel schema")
     manifest = _read_object(manifest_file, "StarIntel schema manifest")
     actual_version = manifest.get("schema_version")
+    actual_release = manifest.get("release_version")
     actual_revision = manifest.get("schema_revision")
-    if actual_version != SCHEMA_VERSION or actual_revision != SCHEMA_REVISION:
+    if (
+        actual_version != SCHEMA_VERSION
+        or actual_release != RELEASE_VERSION
+        or actual_revision != SCHEMA_REVISION
+    ):
         raise SchemaRevisionMismatch(
             "schema manifest mismatch: "
-            f"version={actual_version!r}, revision={actual_revision!r}; "
-            f"expected version={SCHEMA_VERSION!r}, revision={SCHEMA_REVISION!r}"
+            f"version={actual_version!r}, release={actual_release!r}, revision={actual_revision!r}; "
+            f"expected version={SCHEMA_VERSION!r}, release={RELEASE_VERSION!r}, "
+            f"revision={SCHEMA_REVISION!r}"
         )
     return SchemaContract(
         schema=schema,
         schema_path=schema_file,
         manifest_path=manifest_file,
+        release_version=actual_release,
         schema_revision=actual_revision,
         schema_commit=SCHEMA_COMMIT,
     )
