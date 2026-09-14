@@ -55,7 +55,7 @@ JavaScript.
 
 Completed under epic #1:
 
-- strict StarIntel 0.9 document boundary;
+- strict StarIntel 0.9 wire boundary, currently pinned to release 0.9.1;
 - durable new-document routing through `documents.ingest.<dtype>`;
 - updates through `documents.updated.<dtype>`;
 - centralized durable RabbitMQ topology;
@@ -65,13 +65,16 @@ Deterministic relation identity and recursive provenance remain issue #5. The ti
 
 ## StarIntel contract
 
-Production code uses the package-root `starintel_doc` 0.9 API only. The contract is pinned to:
+Production code uses the package-root `starintel_doc` API only. BBPD is pinned to the canonical StarIntel **0.9.1 release** while retaining the immutable v0.9 wire schema version:
 
-- `starintel-doc`: `980f7a217a0d28f22508c2f05831ceb2fefe8bd0`;
+- `starintel-doc` package: `0.9.1` at `5857914a1e34ad18a6956b8ff0df5349de0ca099`;
 - canonical schema repository: `lost-rob0t/starintel-gpt-auto-dig`;
-- canonical schema commit: `ff814ff63868286d68e21502122832802cd5e361`;
-- schema version: `0.9.0`;
-- schema revision: `0.9.0+fields.20260726.2`.
+- canonical schema commit: `6479c0a9dc88ce9fed183515fc4df5d245de0b3a`;
+- release/profile version: `0.9.1`;
+- wire schema version: `0.9.0`;
+- schema revision: `0.9.0+fields.20260909.1`.
+
+The schema filename remains `starintel-doc-v0.9.0.schema.json`: `0.9.1` is the additive release/profile version, not a new wire-envelope version. CI verifies the manifest release and schema revision and requires 0.9.1 dtypes including `operation` and `observation`.
 
 The boundary rejects unsupported versions, dtype aliases, undeclared fields, wrong types, malformed RFC 3339 timestamps, and malformed BBPD targets. Flat 0.8 input is not silently normalized.
 
@@ -173,7 +176,7 @@ Python 3.10 or newer is required.
 
 ```bash
 git clone https://github.com/lost-rob0t/starintel-gpt-auto-dig.git conformance-source
-git -C conformance-source checkout ff814ff63868286d68e21502122832802cd5e361
+git -C conformance-source checkout 6479c0a9dc88ce9fed183515fc4df5d245de0b3a
 export STARINTEL_CONFORMANCE_ROOT="$PWD/conformance-source"
 
 python3 -m venv .venv
