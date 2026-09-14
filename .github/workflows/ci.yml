@@ -15,8 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  STARINTEL_DOC_COMMIT: 980f7a217a0d28f22508c2f05831ceb2fefe8bd0
-  STARINTEL_SCHEMA_COMMIT: ff814ff63868286d68e21502122832802cd5e361
+  STARINTEL_DOC_COMMIT: 5857914a1e34ad18a6956b8ff0df5349de0ca099
+  STARINTEL_SCHEMA_COMMIT: 6479c0a9dc88ce9fed183515fc4df5d245de0b3a
 
 jobs:
   config-safety:
@@ -72,10 +72,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --editable ".[dev]"
 
-      - name: Verify pinned StarIntel package
+      - name: Verify pinned StarIntel 0.9.1 contract
         run: |
           python - <<'PY'
           from bbp.document_boundary import (
+              RELEASE_VERSION,
               STARINTEL_DOC_COMMIT,
               SCHEMA_COMMIT,
               SCHEMA_REVISION,
@@ -83,7 +84,15 @@ jobs:
           )
           assert STARINTEL_DOC_COMMIT == "${{ env.STARINTEL_DOC_COMMIT }}"
           assert SCHEMA_COMMIT == "${{ env.STARINTEL_SCHEMA_COMMIT }}"
-          assert load_schema_contract().schema_revision == SCHEMA_REVISION
+          contract = load_schema_contract()
+          assert RELEASE_VERSION == "0.9.1"
+          assert contract.release_version == RELEASE_VERSION
+          assert contract.schema_revision == SCHEMA_REVISION
+          dtypes = {
+              branch.get("if", {}).get("properties", {}).get("dtype", {}).get("const")
+              for branch in contract.schema.get("allOf", [])
+          }
+          assert {"observation", "operation"} <= dtypes
           PY
         env:
           STARINTEL_CONFORMANCE_ROOT: ${{ github.workspace }}/conformance-source
