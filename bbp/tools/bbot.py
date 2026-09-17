@@ -62,7 +62,6 @@ class BbotActor(ToolActor):
             "-t",
             target.target,
             "--json",
-            "--brief",
             "--no-color",
             "--silent",
             "--yes",
