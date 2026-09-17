@@ -92,7 +92,12 @@ def register_extended_manifests() -> None:
                 operations=("capture-http-transaction",),
                 input_dtypes=("target",),
                 output_dtypes=("http-transaction", "relation"),
-                dependencies=("python-stdlib-http", "pykka", "pika", "starintel-doc>=0.9.2"),
+                dependencies=(
+                    "python-stdlib-http",
+                    "pykka",
+                    "pika",
+                    "starintel-doc network-capture-profile 0.9.2",
+                ),
                 capabilities=(
                     "http-transaction-profile-0.9.2",
                     "bounded-body-artifacts",
@@ -130,7 +135,13 @@ def register_extended_manifests() -> None:
                 operations=("capture-screenshot",),
                 input_dtypes=("target",),
                 output_dtypes=("web-capture", "relation"),
-                dependencies=("gowitness>=3", "chromium", "pykka", "pika", "starintel-doc>=0.9.2"),
+                dependencies=(
+                    "gowitness>=3",
+                    "chromium",
+                    "pykka",
+                    "pika",
+                    "starintel-doc network-capture-profile 0.9.2",
+                ),
                 capabilities=(
                     "web-capture-profile-0.9.2",
                     "artifact-backed-screenshot",
