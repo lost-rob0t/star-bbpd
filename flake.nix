@@ -15,7 +15,7 @@
 
         starintelDocSrc = builtins.fetchGit {
           url = "https://github.com/lost-rob0t/starintel-doc.git";
-          rev = "f722331cbc39b8309b46f4f520a51335f6c63031";
+          rev = "2e52d38c807cccbe5e9b931e645bb46c4491e497";
         };
 
         starintelSchemaSrc = builtins.fetchGit {
