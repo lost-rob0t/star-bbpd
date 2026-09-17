@@ -3,6 +3,8 @@
 
 [service]
 name = "bbp-actors"
+star_authority = "bbp.starintel.actor"
+publish_actor_manifests = true
 log_level = "INFO"
 json_pretty = false
 publisher_pool_size = 3

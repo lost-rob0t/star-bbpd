@@ -16,6 +16,7 @@ from bbp.config import Config
 from bbp.consumer import StopIntake, TargetConsumer
 from bbp.dns_resolver import DnsResolverActor
 from bbp.events import create_event
+from bbp.manifests import publish_actor_manifests
 from bbp.publisher_pool import PublishEvent, PublisherPool, PublisherPoolProxy
 from bbp.rabbit import RabbitManager
 from bbp.tool_pool import create_tool_pools
@@ -80,6 +81,8 @@ def main() -> None:
             "BBP Actor Service starting",
             config.routing,
         )
+        manifest_count = publish_actor_manifests(config, publisher)
+        log.info("Published %s actor manifests before runtime readiness", manifest_count)
 
         tool_pools = create_tool_pools(config, publisher, config.routing)
         missing_pools = set(config.enabled_actors()) - set(tool_pools)

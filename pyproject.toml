@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 star-bbpd = "bbp.main:main"
+star-bbpd-manifests = "bbp.manifests:main"
 
 [tool.setuptools]
 packages = ["bbp", "bbp.tools"]
