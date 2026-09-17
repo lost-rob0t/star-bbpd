@@ -24,13 +24,7 @@ def actor_instance(cls, config: dict):
 
 
 def target(actor: str, value: str, options=()):
-    return build_target(
-        actor,
-        value,
-        "fixture",
-        options=options,
-        now=NOW,
-    )
+    return build_target(actor, value, "fixture", options=options, now=NOW)
 
 
 def test_extended_manifest_catalog_registers_public_actor_boundaries():
@@ -50,11 +44,8 @@ def test_bbot_command_uses_full_json_event_envelope_and_blocks_nuclei_delegation
     assert "--json" in cmd
     assert "--brief" not in cmd
     assert "--no-deps" in cmd
-
     with pytest.raises(ValueError, match="dedicated actors"):
-        actor._build_command(
-            target("bbot", "example.test", options=[{"modules": ["nuclei"]}])
-        )
+        actor._build_command(target("bbot", "example.test", options=[{"modules": ["nuclei"]}]))
 
 
 def test_nuclei_requires_explicit_authorized_scope_and_omits_raw_oast():
@@ -71,7 +62,6 @@ def test_nuclei_requires_explicit_authorized_scope_and_omits_raw_oast():
     )
     with pytest.raises(ValueError, match="authorized_scope"):
         actor._build_command(target("nuclei", "https://example.test"))
-
     cmd = actor._build_command(
         target(
             "nuclei",
@@ -89,11 +79,7 @@ def test_nuclei_requires_explicit_authorized_scope_and_omits_raw_oast():
 def test_http_proxy_command_does_not_accept_proxy_endpoint_from_target():
     actor = actor_instance(
         HttpProxyActor,
-        {
-            "timeout_sec": 20,
-            "max_body_bytes": 4096,
-            "proxy_env": "STARINTEL_HTTP_PROXY",
-        },
+        {"timeout_sec": 20, "max_body_bytes": 4096, "proxy_env": "STARINTEL_HTTP_PROXY"},
     )
     cmd = actor._build_command(
         target(
@@ -111,15 +97,12 @@ def test_http_proxy_command_does_not_accept_proxy_endpoint_from_target():
     assert cmd[cmd.index("--method") + 1] == "HEAD"
 
 
-def test_http_transaction_profile_redacts_headers_and_records_actor_uris():
+def test_http_transaction_profile_records_captcha_solve_context_without_secrets():
     tx = http_transaction_from_record(
         target(
             "http-proxy",
             "https://example.test",
-            options=[
-                {"proxy_actor_uri": "star://proxy.starintel.actor/actor/egress"},
-                {"challenge_actor_uri": "star://browser.starintel.actor/actor/challenge"},
-            ],
+            options=[{"proxy_actor_uri": "star://proxy.starintel.actor/actor/egress"}],
         ),
         {
             "method": "GET",
@@ -130,6 +113,9 @@ def test_http_transaction_profile_redacts_headers_and_records_actor_uris():
             "response_body_artifact_uri": "artifact://bbp/http-bodies/a.bin",
             "response_body_hash": "sha256:a",
             "challenge_status": "observed",
+            "captcha_detection_id": "captcha-detection:fixture-1",
+            "browser_session_ref": "star-secret://webdriver/session/fixture-1",
+            "network_context_ref": "star-secret://network/context/fixture-1",
             "started_at": NOW,
         },
     )
@@ -139,7 +125,10 @@ def test_http_transaction_profile_redacts_headers_and_records_actor_uris():
     assert value["extensions"]["starintel.profile"]["release_version"] == "0.9.2"
     assert value["data"]["request_headers"]["Authorization"] == "[REDACTED]"
     assert value["data"]["proxy_actor_uri"].startswith("star://")
-    assert value["data"]["challenge_actor_uri"].startswith("star://")
+    assert value["data"]["captcha_capability"] == "captcha.solve"
+    assert value["data"]["browser_session_ref"].startswith("star-secret://")
+    assert value["data"]["network_context_ref"].startswith("star-secret://")
+    assert "captcha_result" not in value["data"]
 
 
 def test_web_capture_requires_screenshot_artifact_reference():
