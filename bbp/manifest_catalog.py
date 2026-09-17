@@ -97,18 +97,19 @@ def register_extended_manifests() -> None:
                     "pykka",
                     "pika",
                     "starintel-doc network-capture-profile 0.9.2",
+                    "optional-domain-capability captcha.solve",
                 ),
                 capabilities=(
                     "http-transaction-profile-0.9.2",
                     "bounded-body-artifacts",
                     "sensitive-header-redaction",
-                    "static-operator-proxy",
-                    "challenge-observation",
+                    "proxy-actor-binding",
+                    "captcha-challenge-observation",
+                    "opaque-session-network-context",
                 ),
                 target_options=(
                     {"key": "method", "type": "string", "enum": ["GET", "HEAD"]},
                     {"key": "proxy_actor_uri", "type": "string"},
-                    {"key": "challenge_actor_uri", "type": "string"},
                 ),
                 configuration_schema=_schema(
                     {
@@ -124,7 +125,8 @@ def register_extended_manifests() -> None:
                     "shutdown": "stop intake and finish bounded transaction capture",
                 },
                 authorization={
-                    "credentials": "optional proxy URL from operator-owned environment only"
+                    "credentials": "optional proxy URL from operator-owned environment only",
+                    "captcha": "optional captcha.solve resolved by StarIntel domain policy",
                 },
             ),
             "screenshot": ActorManifestSpec(
@@ -141,16 +143,18 @@ def register_extended_manifests() -> None:
                     "pykka",
                     "pika",
                     "starintel-doc network-capture-profile 0.9.2",
+                    "optional-domain-capability captcha.solve",
+                    "optional-pro-actors WebDriver same-session apply",
                 ),
                 capabilities=(
                     "web-capture-profile-0.9.2",
                     "artifact-backed-screenshot",
-                    "challenge-observation",
-                    "static-operator-proxy",
+                    "captcha-challenge-observation",
+                    "proxy-actor-binding",
+                    "opaque-session-network-context",
                 ),
                 target_options=(
                     {"key": "proxy_actor_uri", "type": "string"},
-                    {"key": "challenge_actor_uri", "type": "string"},
                 ),
                 configuration_schema=_schema(
                     {
@@ -166,7 +170,8 @@ def register_extended_manifests() -> None:
                     "shutdown": "stop intake and terminate bounded browser captures",
                 },
                 authorization={
-                    "credentials": "optional static proxy supplied only in operator configuration"
+                    "credentials": "optional static proxy supplied only in operator configuration",
+                    "captcha": "optional captcha.solve resolved by StarIntel domain policy",
                 },
             ),
         }
