@@ -61,6 +61,28 @@ queue = "bbp.katana.targets"
 prefetch = 3
 emit_relations = true
 
+# New actors are opt-in so installing star-bbpd does not implicitly install or
+# execute extra scanners/browsers.
+[actors.bbot]
+enabled = false
+queue = "bbp.bbot.targets"
+prefetch = 1
+
+[actors.nuclei]
+enabled = false
+queue = "bbp.nuclei.targets"
+prefetch = 1
+
+[actors.http-proxy]
+enabled = false
+queue = "bbp.http-proxy.targets"
+prefetch = 2
+
+[actors.screenshot]
+enabled = false
+queue = "bbp.screenshot.targets"
+prefetch = 2
+
 [tools]
 
 [tools.subfinder]
@@ -86,6 +108,45 @@ bin = "katana"
 timeout_sec = 900
 publish_timeout_sec = 30
 args = ["-silent", "-json"]
+
+[tools.bbot]
+bin = "bbot"
+timeout_sec = 900
+publish_timeout_sec = 30
+modules = ["httpx"]
+allowed_modules = ["httpx", "sslcert", "wappalyzer"]
+
+[tools.nuclei]
+bin = "nuclei"
+timeout_sec = 900
+publish_timeout_sec = 30
+rate_limit = 10
+concurrency = 5
+bulk_size = 5
+allowed_tags = ["exposure", "misconfig", "tech"]
+allowed_templates = []
+exclude_tags = ["intrusive", "rce", "sqli"]
+
+[tools.http-proxy]
+timeout_sec = 30
+publish_timeout_sec = 30
+max_body_bytes = 1048576
+artifact_dir = "artifacts/http-bodies"
+artifact_uri_prefix = "artifact://bbp/http-bodies"
+# Optional: name of an environment variable containing ONE operator-managed
+# static proxy URL. Credentials are never accepted from target options.
+# proxy_env = "STARINTEL_HTTP_PROXY"
+
+[tools.screenshot]
+bin = "gowitness"
+timeout_sec = 120
+publish_timeout_sec = 30
+page_timeout_sec = 30
+delay_sec = 1
+artifact_dir = "artifacts/screenshots"
+artifact_uri_prefix = "artifact://bbp/screenshots"
+# Optional operator-managed static proxy, not target-controlled rotation.
+# proxy_url = "http://127.0.0.1:8080"
 
 [dns_resolver]
 enabled = true

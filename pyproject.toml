@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "star-bbpd"
-version = "0.1.0"
-description = "StarIntel bug-bounty and reconnaissance actor service"
+version = "0.2.0"
+description = "StarIntel bug-bounty, reconnaissance, and web evidence actor service"
 requires-python = ">=3.10"
 dependencies = [
     "dnspython>=2.6,<3",
@@ -13,7 +13,7 @@ dependencies = [
     "pykka>=4,<5",
     "ulid-py>=1.1,<2",
     "tomli>=2,<3; python_version<'3.11'",
-    "starintel-doc @ git+https://github.com/lost-rob0t/starintel-doc.git@5857914a1e34ad18a6956b8ff0df5349de0ca099",
+    "starintel-doc @ git+https://github.com/lost-rob0t/starintel-doc.git@2e52d38c807cccbe5e9b931e645bb46c4491e497",
 ]
 
 [project.optional-dependencies]
@@ -26,7 +26,8 @@ dev = [
 
 [project.scripts]
 star-bbpd = "bbp.main:main"
-star-bbpd-manifests = "bbp.manifests:main"
+star-bbpd-manifests = "bbp.manifest_cli:main"
+star-bbpd-http-capture = "bbp.http_capture_adapter:main"
 
 [tool.setuptools]
 packages = ["bbp", "bbp.tools"]

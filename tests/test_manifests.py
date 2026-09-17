@@ -38,15 +38,18 @@ def load_example() -> Config:
 
 def test_manifest_registry_covers_public_tool_actor_boundaries():
     assert set(TOOL_CLASSES) == set(ACTOR_MANIFESTS) - {"dns-resolver"}
+    assert {"bbot", "nuclei", "http-proxy", "screenshot"} <= set(TOOL_CLASSES)
 
 
 def test_enabled_manifests_use_current_wire_and_hierarchical_star_identity():
+    config = load_example()
     documents = {
         document.to_dict()["data"]["actor"]: document.to_dict()
-        for document in enabled_actor_manifest_documents(load_example(), now=NOW)
+        for document in enabled_actor_manifest_documents(config, now=NOW)
     }
 
-    assert set(documents) == {*TOOL_CLASSES, "dns-resolver"}
+    expected = set(config.enabled_actors()) | {"dns-resolver"}
+    assert set(documents) == expected
     for actor_id, document in documents.items():
         assert document["schema_version"] == "0.9.0"
         assert document["dtype"] == "actor-manifest"
@@ -70,6 +73,18 @@ def test_enabled_manifests_use_current_wire_and_hierarchical_star_identity():
         assert contract["schema_revision"] == "0.9.0+fields.20260909.1"
         decoded = decode_document(json.dumps(document), expected_dtype="actor-manifest")
         assert decoded.id == document["_id"]
+
+
+def test_opt_in_extended_actor_manifest_uses_network_capture_profile_contract():
+    config = load_example()
+    for actor_id in ("bbot", "nuclei", "http-proxy", "screenshot"):
+        document = actor_manifest_document(config, actor_id, now=NOW).to_dict()
+        contract = document["extensions"]["starintel.actor_manifest.v1"]
+        assert contract["resourceUri"] == f"star://bbp.starintel.actor/actor/{actor_id}"
+        if actor_id == "http-proxy":
+            assert "http-transaction" in contract["output_dtypes"]
+        if actor_id == "screenshot":
+            assert "web-capture" in contract["output_dtypes"]
 
 
 def test_transport_queue_changes_do_not_change_actor_identity_or_semantic_digest():
