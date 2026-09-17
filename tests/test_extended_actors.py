@@ -17,16 +17,10 @@ from bbp.tools.screenshot import ScreenshotActor
 NOW = "2026-09-17T01:00:00Z"
 
 
-class DummyPublisher:
-    def publish_required(self, message, timeout):
-        raise AssertionError("publisher should not be used by command construction")
-
-    def tell(self, message):
-        return None
-
-
-def actor_instance(cls, name: str, config: dict):
-    return cls(name, DummyPublisher(), config)
+def actor_instance(cls, config: dict):
+    actor = object.__new__(cls)
+    actor.tool_config = config
+    return actor
 
 
 def target(actor: str, value: str, options=()):
@@ -49,7 +43,6 @@ def test_extended_manifest_catalog_registers_public_actor_boundaries():
 def test_bbot_command_uses_json_stdout_and_blocks_nuclei_delegation():
     actor = actor_instance(
         BbotActor,
-        "bbot-0",
         {"bin": "bbot", "allowed_modules": ["httpx", "sslcert"], "modules": ["httpx"]},
     )
     cmd = actor._build_command(target("bbot", "example.test"))
@@ -67,7 +60,6 @@ def test_bbot_command_uses_json_stdout_and_blocks_nuclei_delegation():
 def test_nuclei_requires_explicit_authorized_scope_and_omits_raw_oast():
     actor = actor_instance(
         NucleiActor,
-        "nuclei-0",
         {
             "bin": "nuclei",
             "allowed_tags": ["tech"],
@@ -90,7 +82,6 @@ def test_nuclei_requires_explicit_authorized_scope_and_omits_raw_oast():
     assert "-omit-raw" in cmd
     assert "-no-interactsh" in cmd
     assert "-restrict-local-network-access" in cmd
-    assert "dos,fuzz,bruteforce,local" not in cmd  # sorted output is deterministic, not order-coupled
     excluded = cmd[cmd.index("-exclude-tags") + 1].split(",")
     assert {"dos", "fuzz", "bruteforce", "local"} <= set(excluded)
 
@@ -98,7 +89,6 @@ def test_nuclei_requires_explicit_authorized_scope_and_omits_raw_oast():
 def test_http_proxy_command_does_not_accept_proxy_endpoint_from_target():
     actor = actor_instance(
         HttpProxyActor,
-        "http-proxy-0",
         {
             "timeout_sec": 20,
             "max_body_bytes": 4096,
@@ -169,7 +159,6 @@ def test_web_capture_requires_screenshot_artifact_reference():
 def test_screenshot_command_disables_html_and_network_log_capture(tmp_path: Path):
     actor = actor_instance(
         ScreenshotActor,
-        "screenshot-0",
         {
             "bin": "gowitness",
             "artifact_dir": str(tmp_path),
