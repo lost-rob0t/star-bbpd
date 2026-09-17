@@ -16,6 +16,7 @@ from bbp.config import Config
 from bbp.consumer import StopIntake, TargetConsumer
 from bbp.dns_resolver import DnsResolverActor
 from bbp.events import create_event
+from bbp.manifest_catalog import register_extended_manifests
 from bbp.manifests import publish_actor_manifests
 from bbp.publisher_pool import PublishEvent, PublisherPool, PublisherPoolProxy
 from bbp.rabbit import RabbitManager
@@ -58,6 +59,7 @@ def main() -> None:
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.toml"
 
     try:
+        register_extended_manifests()
         config = Config.load(config_path)
         setup_logging(
             config.service.get("log_level", "INFO"),
@@ -178,8 +180,6 @@ def shutdown(
         routing_config,
     )
 
-    # Stop new target intake while keeping consumer actors alive to receive
-    # settlement ACK/NACK messages from in-flight tool actors.
     for index, consumer_ref in enumerate(consumer_refs):
         consumer_ref.ask(StopIntake(), block=True, timeout=shutdown_timeout)
         log.info("Stopped intake for consumer-%s", index)
@@ -191,8 +191,6 @@ def shutdown(
         pool.stop(shutdown_timeout)
         log.info("Stopped tool pool %s after settlement", name)
 
-    # ACK/NACK messages are now queued before each stop message, so consumer
-    # actors drain those settlement decisions before exiting.
     for index, consumer_ref in enumerate(consumer_refs):
         _stop_actor(consumer_ref, shutdown_timeout, f"consumer-{index}")
 
