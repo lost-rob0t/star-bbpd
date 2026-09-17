@@ -15,7 +15,7 @@
 
         starintelDocSrc = builtins.fetchGit {
           url = "https://github.com/lost-rob0t/starintel-doc.git";
-          rev = "0cf8a3dea4a63df867ff314af2d296197cc81dec";
+          rev = "f722331cbc39b8309b46f4f520a51335f6c63031";
         };
 
         starintelSchemaSrc = builtins.fetchGit {
@@ -34,17 +34,12 @@
           pname = "ulid-py";
           version = "1.1.0";
           format = "setuptools";
-
           src = pkgs.fetchPypi {
             pname = "ulid-py";
             version = "1.1.0";
             hash = "sha256-3GiEvpFVjfB3wwEbn7DIfRCXy4/GU0sR8xAWGv1XOPA=";
           };
-
-          nativeBuildInputs = with pythonPackages; [
-            setuptools
-          ];
-
+          nativeBuildInputs = with pythonPackages; [ setuptools ];
           doCheck = false;
           pythonImportsCheck = [ "ulid" ];
         };
@@ -54,23 +49,13 @@
           version = "0.9.1";
           format = "pyproject";
           src = starintelDocSrc;
-
-          nativeBuildInputs = with pythonPackages; [
-            setuptools
-          ];
-
-          propagatedBuildInputs = with pythonPackages; [
-            ulid-py
-            dataclasses-json
-            jsonschema
-          ];
-
+          nativeBuildInputs = with pythonPackages; [ setuptools ];
+          propagatedBuildInputs = with pythonPackages; [ ulid-py dataclasses-json jsonschema ];
           doCheck = true;
           checkPhase = ''
             export STARINTEL_CONFORMANCE_ROOT=${starintelSchemaSrc}
             ${python.interpreter} -m unittest discover -s tests
           '';
-
           pythonImportsCheck = [ "starintel_doc" "starintel_doc.network_capture" ];
         };
 
@@ -79,41 +64,22 @@
           version = "0.2.0";
           src = ./.;
           format = "pyproject";
-
-          nativeBuildInputs = with pythonPackages; [
-            setuptools
-            wheel
-          ] ++ [
-            pkgs.makeWrapper
-          ];
-
-          nativeCheckInputs = with pythonPackages; [
-            pytest
-          ];
-
+          nativeBuildInputs = with pythonPackages; [ setuptools wheel ] ++ [ pkgs.makeWrapper ];
+          nativeCheckInputs = with pythonPackages; [ pytest ];
           propagatedBuildInputs = with pythonPackages; [
-            pika
-            pykka
-            ulid-py
-            tomli
-            dnspython
-            starintel-doc-pkg
+            pika pykka ulid-py tomli dnspython starintel-doc-pkg
           ];
-
           doCheck = true;
           checkPhase = ''
             export STARINTEL_CONFORMANCE_ROOT=${starintelSchemaSrc}
             pytest -q
           '';
-
           pythonImportsCheck = [ "bbp.document_boundary" "bbp.network_capture" ];
-
           postFixup = ''
             wrapProgram $out/bin/star-bbpd \
               --prefix PATH : ${pkgs.lib.makeBinPath tools} \
               --set STARINTEL_CONFORMANCE_ROOT ${starintelSchemaSrc}
           '';
-
           meta = with pkgs.lib; {
             description = "BBP Actor Service";
             license = licenses.mit;
@@ -127,18 +93,8 @@
 
         devShells.default = pkgs.mkShell {
           buildInputs = with pythonPackages; [
-            python
-            pika
-            pykka
-            ulid-py
-            tomli
-            dnspython
-            starintel-doc-pkg
-            pytest
-            ruff
-            build
+            python pika pykka ulid-py tomli dnspython starintel-doc-pkg pytest ruff build
           ] ++ tools;
-
           shellHook = ''
             export STARINTEL_CONFORMANCE_ROOT=${starintelSchemaSrc}
           '';
