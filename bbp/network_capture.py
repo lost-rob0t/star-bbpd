@@ -5,10 +5,18 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from starintel_doc import build_http_transaction, build_web_capture
+from starintel_doc import PROFILE_VERSION, build_http_transaction, build_web_capture
 
 from bbp.document_boundary import TargetDocument
 from bbp.target_options import string_option
+
+EXPECTED_PROFILE_VERSION = "0.9.2"
+
+if PROFILE_VERSION != EXPECTED_PROFILE_VERSION:
+    raise RuntimeError(
+        f"starintel_doc network-capture profile {PROFILE_VERSION!r}; "
+        f"expected {EXPECTED_PROFILE_VERSION!r}"
+    )
 
 
 @dataclass(frozen=True, slots=True)
