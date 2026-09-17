@@ -40,7 +40,7 @@ def test_extended_manifest_catalog_registers_public_actor_boundaries():
     assert ACTOR_MANIFESTS["screenshot"].output_dtypes == ("web-capture", "relation")
 
 
-def test_bbot_command_uses_json_stdout_and_blocks_nuclei_delegation():
+def test_bbot_command_uses_full_json_event_envelope_and_blocks_nuclei_delegation():
     actor = actor_instance(
         BbotActor,
         {"bin": "bbot", "allowed_modules": ["httpx", "sslcert"], "modules": ["httpx"]},
@@ -48,7 +48,7 @@ def test_bbot_command_uses_json_stdout_and_blocks_nuclei_delegation():
     cmd = actor._build_command(target("bbot", "example.test"))
     assert cmd[:3] == ["bbot", "-t", "example.test"]
     assert "--json" in cmd
-    assert "--brief" in cmd
+    assert "--brief" not in cmd
     assert "--no-deps" in cmd
 
     with pytest.raises(ValueError, match="dedicated actors"):
