@@ -11,6 +11,7 @@ from bbp.document_boundary import TargetDocument
 from bbp.target_options import string_option
 
 EXPECTED_PROFILE_VERSION = "0.9.2"
+NETWORK_CAPTURE_DOC_COMMIT = "2e52d38c807cccbe5e9b931e645bb46c4491e497"
 
 if PROFILE_VERSION != EXPECTED_PROFILE_VERSION:
     raise RuntimeError(
