@@ -48,6 +48,24 @@ class ProfileDocument:
         )
 
 
+def _copy_capture_context(record: Mapping[str, Any], fields: dict[str, Any]) -> None:
+    for key in (
+        "challenge_status",
+        "captcha_detection_id",
+        "captcha_capability",
+        "browser_session_ref",
+        "network_context_ref",
+    ):
+        if key in record and record[key] is not None:
+            fields[key] = deepcopy(record[key])
+
+
+def _copy_proxy_binding(target: TargetDocument, fields: dict[str, Any]) -> None:
+    proxy_actor_uri = string_option(target.options, "proxy_actor_uri")
+    if proxy_actor_uri:
+        fields["proxy_actor_uri"] = proxy_actor_uri
+
+
 def http_transaction_from_record(
     target: TargetDocument,
     record: Mapping[str, Any],
@@ -88,24 +106,19 @@ def http_transaction_from_record(
         "certificate_sha256",
         "redirect_from_id",
         "redirect_to_id",
-        "challenge_status",
         "request_truncated",
         "response_truncated",
     )
     for key in passthrough:
         if key in record and record[key] is not None:
             fields[key] = deepcopy(record[key])
+    _copy_capture_context(record, fields)
     fields["capture_actor_uri"] = string_option(
         target.options,
         "capture_actor_uri",
         "star://bbp.starintel.actor/actor/http-proxy",
     )
-    proxy_actor_uri = string_option(target.options, "proxy_actor_uri")
-    if proxy_actor_uri:
-        fields["proxy_actor_uri"] = proxy_actor_uri
-    challenge_actor_uri = string_option(target.options, "challenge_actor_uri")
-    if challenge_actor_uri:
-        fields["challenge_actor_uri"] = challenge_actor_uri
+    _copy_proxy_binding(target, fields)
 
     document = build_http_transaction(
         dataset=target.dataset,
@@ -156,21 +169,16 @@ def web_capture_from_record(
         "dom_artifact_size_bytes",
         "captured_at",
         "http_transaction_ids",
-        "challenge_status",
     ):
         if key in record and record[key] is not None:
             fields[key] = deepcopy(record[key])
+    _copy_capture_context(record, fields)
     fields["capture_actor_uri"] = string_option(
         target.options,
         "capture_actor_uri",
         "star://bbp.starintel.actor/actor/screenshot",
     )
-    proxy_actor_uri = string_option(target.options, "proxy_actor_uri")
-    if proxy_actor_uri:
-        fields["proxy_actor_uri"] = proxy_actor_uri
-    challenge_actor_uri = string_option(target.options, "challenge_actor_uri")
-    if challenge_actor_uri:
-        fields["challenge_actor_uri"] = challenge_actor_uri
+    _copy_proxy_binding(target, fields)
 
     document = build_web_capture(
         dataset=target.dataset,
