@@ -15,7 +15,7 @@
 
         starintelDocSrc = builtins.fetchGit {
           url = "https://github.com/lost-rob0t/starintel-doc.git";
-          rev = "5857914a1e34ad18a6956b8ff0df5349de0ca099";
+          rev = "0cf8a3dea4a63df867ff314af2d296197cc81dec";
         };
 
         starintelSchemaSrc = builtins.fetchGit {
@@ -71,12 +71,12 @@
             ${python.interpreter} -m unittest discover -s tests
           '';
 
-          pythonImportsCheck = [ "starintel_doc" ];
+          pythonImportsCheck = [ "starintel_doc" "starintel_doc.network_capture" ];
         };
 
         star-bbpd = pythonPackages.buildPythonPackage {
           pname = "star-bbpd";
-          version = "0.1.0";
+          version = "0.2.0";
           src = ./.;
           format = "pyproject";
 
@@ -106,7 +106,7 @@
             pytest -q
           '';
 
-          pythonImportsCheck = [ "bbp.document_boundary" ];
+          pythonImportsCheck = [ "bbp.document_boundary" "bbp.network_capture" ];
 
           postFixup = ''
             wrapProgram $out/bin/star-bbpd \
