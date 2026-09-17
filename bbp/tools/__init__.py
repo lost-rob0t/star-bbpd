@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from bbp.manifest_catalog import register_extended_manifests
 from bbp.tools.bbot import BbotActor
 from bbp.tools.http_proxy import HttpProxyActor
 from bbp.tools.httpx import HttpxActor
@@ -19,6 +20,8 @@ TOOL_CLASSES = {
     "screenshot": ScreenshotActor,
     "subfinder": SubfinderActor,
 }
+
+register_extended_manifests()
 
 __all__ = [
     "TOOL_CLASSES",
