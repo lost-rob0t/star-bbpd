@@ -50,6 +50,7 @@
           format = "pyproject";
           src = starintelDocSrc;
           nativeBuildInputs = with pythonPackages; [ setuptools ];
+          nativeCheckInputs = with pythonPackages; [ pytest ];
           propagatedBuildInputs = with pythonPackages; [ ulid-py dataclasses-json jsonschema ];
           doCheck = true;
           checkPhase = ''
